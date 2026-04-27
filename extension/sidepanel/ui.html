@@ -21,6 +21,7 @@
             flex-direction: column;
             height: 100vh;
             overflow: hidden;
+            box-sizing: border-box;
         }
         .header {
             display: flex;
@@ -85,6 +86,7 @@
         .log-container {
             flex-grow: 1;
             overflow-y: auto;
+            overflow-x: hidden;
             background: #020617;
             border-radius: 8px;
             padding: 12px;
@@ -92,6 +94,11 @@
             font-size: 0.85rem;
             display: flex;
             flex-direction: column-reverse;
+            scrollbar-width: none; /* Firefox */
+            -ms-overflow-style: none; /* IE/Edge */
+        }
+        .log-container::-webkit-scrollbar {
+            display: none; /* Chrome/Safari/Opera */
         }
         .log-entry {
             margin-bottom: 8px;
@@ -104,11 +111,22 @@
         .log-info { color: #f8fafc; }
         
         .footer-hint {
-            font-size: 0.75rem;
-            color: #64748b;
+            font-size: 0.7rem;
+            color: #475569;
             text-align: center;
             margin-top: 12px;
             padding-top: 8px;
+            padding-bottom: 4px;
+            border-top: 1px solid #1e293b;
+            flex-shrink: 0;
+        }
+        .footer-hint .author-name {
+            font-weight: 700;
+            font-size: 0.8rem;
+            background: linear-gradient(135deg, #22c55e, #3b82f6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
         }
     </style>
 </head>
@@ -133,7 +151,7 @@
     </div>
 
     <div class="footer-hint">
-        Control this session via Antigravity Chat
+        Built by <span class="author-name">Jall Fiel</span>
     </div>
 
     <script src="ui.js"></script>
