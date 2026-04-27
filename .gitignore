@@ -1,8 +1,10 @@
 # .gitignore cleared as per user request
 
-# Investigation files
-brain_input.json
-brain_output.json
-current_view.png
+# Investigation files (server sidecar)
+server/brain_input.json
+server/brain_output.json
+server/heartbeat.txt
+server/current_view.png
+server/server.log
 tssidekick_memory.json
 tssidekick_log.txt

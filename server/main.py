@@ -5,6 +5,20 @@ import os
 import base64
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from gemma import gemma_client
+import logging
+import sys
+
+# Setup logging to file
+log_file = os.path.join(os.path.dirname(__file__), "server.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file, mode='w'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("ts_sidekick")
 
 app = FastAPI()
 
@@ -43,17 +57,18 @@ Respond ONLY with a JSON object in this format:
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     client_host = websocket.client.host
-    print(f"Extension connected from {client_host}")
+    logger.info(f"Extension connected from {client_host}")
     
     try:
         while True:
             raw_data = await websocket.receive_text()
+            with open("heartbeat.txt", "w") as f: f.write(f"Received message at {asyncio.get_event_loop().time()}")
             message = json.loads(raw_data)
             
             msg_type = message.get("type")
             tab_id = str(message.get("tabId", "unknown"))
             
-            print(f"Received {msg_type} for Tab {tab_id}")
+            logger.info(f"Received {msg_type} for Tab {tab_id}")
             
             if msg_type == "init":
                 sessions[tab_id] = {
@@ -61,7 +76,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     "model": message.get("model", "gemma-4-31b-it"),
                     "user_query": message.get("query")
                 }
-                print(f"Session initialized for tab {tab_id} using {sessions[tab_id]['model']}")
+                logger.info(f"Session initialized for tab {tab_id} using {sessions[tab_id]['model']}")
                 
                 await websocket.send_text(json.dumps({
                     "type": "command",
@@ -72,7 +87,7 @@ async def websocket_endpoint(websocket: WebSocket):
             elif msg_type == "observation":
                 session = sessions.get(tab_id)
                 if not session:
-                    print(f"No session found for tab {tab_id}")
+                    logger.warning(f"No session found for tab {tab_id}")
                     continue
 
                 obs = message.get("data")
@@ -83,7 +98,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 if model_choice == "antigravity":
                     # ANTIGRAVITY BRAIN MODE
-                    print(f"Handing over to Antigravity Brain for Tab {tab_id}...")
+                    logger.info(f"Handing over to Antigravity Brain for Tab {tab_id}...")
                     
                     # Handle Screenshot
                     if "screenshot" in obs and obs["screenshot"]:
@@ -91,9 +106,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             header, encoded = obs["screenshot"].split(",", 1)
                             with open("current_view.png", "wb") as f:
                                 f.write(base64.b64decode(encoded))
-                            print("Screenshot saved to server/current_view.png")
+                            logger.info("Screenshot saved to server/current_view.png")
                         except Exception as e:
-                            print(f"Failed to save screenshot: {e}")
+                            logger.error(f"Failed to save screenshot: {e}")
 
                     # Ensure no stale output exists
                     if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
@@ -106,23 +121,52 @@ async def websocket_endpoint(websocket: WebSocket):
                             "history": session["history"]
                         }, f, indent=2)
 
-                    print("Waiting for Antigravity Brain response (brain_output.json)...")
+                    logger.info("Waiting for Antigravity Brain response (brain_output.json)...")
                     
                     while not os.path.exists(BRAIN_OUTPUT):
                         await asyncio.sleep(0.5)
                     
-                    try:
-                        with open(BRAIN_OUTPUT, "r", encoding="utf-8") as f:
-                            action_data = json.load(f)
-                        os.remove(BRAIN_OUTPUT)
-                        os.remove(BRAIN_INPUT)
-                    except Exception as e:
-                        print(f"Error reading brain_output.json: {e}")
-                        action_data = {"thought": "Error reading brain file.", "action": "answer_user", "payload": {"message": "Tunnel error."}}
+                    # Robust read with retries to avoid race conditions
+                    retries = 5
+                    while retries > 0:
+                        try:
+                            with open(BRAIN_OUTPUT, "r", encoding="utf-8") as f:
+                                action_data = json.load(f)
+                            
+                            # SCRIPT TUNNEL: Handle code_file if specified
+                            if action_data.get("action") == "inject_js" and "payload" in action_data:
+                                payload = action_data["payload"]
+                                if "code_file" in payload:
+                                    script_path = payload["code_file"]
+                                    script_filename = os.path.basename(script_path)
+                                    if os.path.exists(script_filename):
+                                        with open(script_filename, "r", encoding="utf-8") as sf:
+                                            payload["code"] = sf.read()
+                                        logger.info(f"Tunneling script from {script_filename}...")
+                                        os.remove(script_filename)
+                            
+                            os.remove(BRAIN_OUTPUT)
+                            os.remove(BRAIN_INPUT)
+                            break # Success
+                        except (json.JSONDecodeError, PermissionError) as e:
+                            retries -= 1
+                            if retries == 0:
+                                logger.error(f"Error reading brain_output.json after retries: {e}")
+                                action_data = {"thought": "Error reading brain file.", "action": "answer_user", "payload": {"message": f"Tunnel error: {str(e)}"}}
+                                if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
+                                if os.path.exists(BRAIN_INPUT): os.remove(BRAIN_INPUT)
+                            else:
+                                await asyncio.sleep(0.2)
+                        except Exception as e:
+                            logger.error(f"Unexpected error reading brain_output.json: {e}")
+                            action_data = {"thought": "Error reading brain file.", "action": "answer_user", "payload": {"message": f"Tunnel error: {str(e)}"}}
+                            if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
+                            if os.path.exists(BRAIN_INPUT): os.remove(BRAIN_INPUT)
+                            break
 
                 else:
                     # STANDARD GEMMA MODE
-                    print(f"Querying Gemma for Tab {tab_id}...")
+                    logger.info(f"Querying Gemma for Tab {tab_id}...")
                     prompt = f"User Request: {user_query}\n\nCURRENT OBSERVATION:\nURL: {obs.get('url')}\nDOM:\n{obs.get('dom')}\n\nCONSOLE:\n{obs.get('console')}\n\nNETWORK:\n{obs.get('network')}\n"
                     
                     response_text = await gemma_client.query(
@@ -142,11 +186,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         session["history"].append({"role": "user", "parts": [prompt]})
                         session["history"].append({"role": "model", "parts": [response_text]})
                     except Exception as e:
-                        print(f"Error parsing Gemma response: {e}")
+                        logger.error(f"Error parsing Gemma response: {e}")
                         action_data = {"type": "error", "message": "Parse error."}
 
                 if action_data:
-                    print(f"Sending action to Extension: {action_data.get('action')}")
+                    logger.info(f"Sending action to Extension: {action_data.get('action')}")
                     await websocket.send_text(json.dumps({
                         "type": "action",
                         "tabId": tab_id,
@@ -154,9 +198,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     }))
 
     except WebSocketDisconnect:
-        print(f"Extension disconnected from {client_host}")
+        logger.info(f"Extension disconnected from {client_host}")
     except Exception as e:
-        print(f"WebSocket Error: {e}")
+        logger.error(f"WebSocket Error: {e}")
 
 import threading
 from PIL import Image
@@ -165,20 +209,6 @@ import uvicorn
 import sys
 import ctypes
 import socket as socket_lib
-
-import logging
-
-# Setup logging to file
-log_file = os.path.join(os.path.dirname(__file__), "server.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_file, mode='w'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger("ts_sidekick")
 
 def is_port_in_use(port):
     with socket_lib.socket(socket_lib.AF_INET, socket_lib.SOCK_STREAM) as s:

@@ -9,7 +9,10 @@
     "scripting",
     "webNavigation",
     "storage",
-    "debugger"
+    "debugger",
+    "browsingData",
+    "declarativeNetRequest",
+    "cookies"
   ],
   "host_permissions": [
     "<all_urls>"

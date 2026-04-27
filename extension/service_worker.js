@@ -8,6 +8,8 @@ let diagnostics = {
     network: []
 };
 
+let networkRequests = {};
+
 // Ensure the side panel opens when the extension icon is clicked
 chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
@@ -82,6 +84,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
                                 response.url.includes('cart');
                                 
             if (isInteresting) {
+                networkRequests[response.url] = requestId;
                 chrome.debugger.sendCommand({ tabId: source.tabId }, "Network.getResponseBody", { requestId }, (result) => {
                     if (result && result.body) {
                         const cleanUrl = response.url.split('?')[0].split('/').pop();
@@ -90,6 +93,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
                     }
                 });
             } else {
+                networkRequests[response.url] = requestId;
                 diagnostics.network.push(`✅ SUCCESS: ${response.url.split('?')[0]} (${response.status})`);
             }
         }
@@ -143,20 +147,25 @@ async function captureObservation(tabId) {
 
         const pageData = results[0].result;
         
-        const recentLogs = diagnostics.logs.slice(-15).join('\n') || "No console logs.";
-        const recentNetwork = diagnostics.network.slice(-15).join('\n') || "No network issues.";
+        const recentLogs = diagnostics.logs.slice(-50).join('\n') || "No console logs.";
+        const recentNetwork = diagnostics.network.slice(-50).join('\n') || "No network issues.";
 
         let screenshot = null;
         try {
-            screenshot = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+            const tab = await chrome.tabs.get(tabId);
+            screenshot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
         } catch (e) { console.warn("Screenshot failed:", e); }
+
+        const elementCapture = diagnostics.element_capture;
+        diagnostics.element_capture = null; // Consume it
 
         return {
             dom: pageData.dom,
             url: pageData.url,
             console: recentLogs,
             network: recentNetwork,
-            screenshot: screenshot
+            screenshot: screenshot,
+            element_view: elementCapture
         };
     } catch (e) {
         return { dom: "Error: Access denied.", console: e.message, network: "" };
@@ -172,7 +181,7 @@ async function performAction(tabId, actionData) {
             await chrome.scripting.executeScript({
                 target: { tabId },
                 world: payload.world || 'ISOLATED',
-                func: (code) => { try { eval(code); } catch(e) { console.error(msg); } },
+                func: (code) => { try { eval(code); } catch(e) { console.error(e); } },
                 args: [payload.code]
             });
         } else if (action === "click") {
@@ -232,6 +241,94 @@ async function performAction(tabId, actionData) {
                 target: { tabId },
                 css: payload.css
             });
+        } else if (action === "get_network_body") {
+            const requestId = networkRequests[payload.url];
+            if (requestId) {
+                const result = await new Promise(r => {
+                    chrome.debugger.sendCommand({ tabId }, "Network.getResponseBody", { requestId }, (res) => r(res));
+                });
+                console.log(`>>> NETWORK_BODY [${payload.url}]:`, result ? result.body : "Failed to retrieve");
+                diagnostics.logs.push(`>>> NETWORK_BODY [${payload.url}]: ${result ? result.body : "Failed"}`);
+            } else {
+                diagnostics.logs.push(`>>> NETWORK_BODY [${payload.url}]: NOT_FOUND (Request might be too old or filtered)`);
+            }
+        } else if (action === "clear_site_data") {
+            const origin = new URL(payload.url || (await captureObservation(tabId)).url).origin;
+            await chrome.browsingData.remove({
+                origins: [origin]
+            }, {
+                "cache": true,
+                "cookies": true,
+                "localStorage": true
+            });
+            diagnostics.logs.push(`🧹 SITE DATA CLEARED: ${origin}`);
+
+
+
+        } else if (action === "capture_element") {
+            const rect = await chrome.scripting.executeScript({
+                target: { tabId },
+                func: (sel) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return null;
+                    const r = el.getBoundingClientRect();
+                    return { x: r.left, y: r.top, w: r.width, h: r.height, dpr: window.devicePixelRatio };
+                },
+                args: [payload.selector]
+            });
+
+            if (rect[0].result) {
+                const { x, y, w, h, dpr } = rect[0].result;
+                const tab = await chrome.tabs.get(tabId);
+                const screenshot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+                if (screenshot) {
+                    diagnostics.logs.push(`🔍 ELEMENT CAPTURED: ${payload.selector} at ${x},${y}`);
+                    diagnostics.element_capture = { selector: payload.selector, data: screenshot, x, y, w, h, dpr };
+                }
+            }
+        } else if (action === "click_at_position") {
+            await chrome.scripting.executeScript({
+                target: { tabId },
+                func: (x, y) => {
+                    const el = document.elementFromPoint(x, y);
+                    if (el) {
+                        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        const dot = document.createElement('div');
+                        dot.style.position = 'fixed';
+                        dot.style.left = (x - 10) + 'px';
+                        dot.style.top = (y - 10) + 'px';
+                        dot.style.width = '20px';
+                        dot.style.height = '20px';
+                        dot.style.backgroundColor = '#22c55e';
+                        dot.style.borderRadius = '50%';
+                        dot.style.zIndex = '2147483647';
+                        dot.style.pointerEvents = 'none';
+                        document.documentElement.appendChild(dot);
+                        setTimeout(() => {
+                            el.click();
+                            dot.remove();
+                        }, 500);
+                    }
+                },
+                args: [payload.x, payload.y]
+            });
+            diagnostics.logs.push(`🖱️ CLICK AT POSITION: ${payload.x}, ${payload.y}`);
+        } else if (action === "get_computed_style") {
+            const styles = await chrome.scripting.executeScript({
+                target: { tabId },
+                func: (sel, props) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return "NOT_FOUND";
+                    const computed = window.getComputedStyle(el);
+                    const result = {};
+                    props.forEach(p => result[p] = computed.getPropertyValue(p));
+                    return result;
+                },
+                args: [payload.selector, payload.properties || []]
+            });
+            diagnostics.logs.push(`>>> COMPUTED_STYLE [${payload.selector}]: ${JSON.stringify(styles[0].result)}`);
+        } else if (action === "observe") {
+            // Just capture observation below
         }
     } catch (e) {
         console.error("Action execution failed:", e);
@@ -269,6 +366,10 @@ chrome.runtime.onConnect.addListener((p) => {
             notifyStatus(socket && socket.readyState === WebSocket.OPEN);
         } else if (msg.type === "start_agent") {
             activeTabId = msg.tabId;
+            const rules = await chrome.declarativeNetRequest.getDynamicRules();
+            const ruleIds = rules.map(r => r.id);
+            if (ruleIds.length > 0) await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: ruleIds }).catch(() => {});
+
             await attachDebugger(activeTabId);
             async_inject_glow(activeTabId);
             if (socket && socket.readyState === WebSocket.OPEN) {
