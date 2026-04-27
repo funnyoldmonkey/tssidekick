@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "TS Sidekick",
+  "version": "1.0",
+  "description": "Agentic Troubleshooting Sidekick powered by Gemma 4",
+  "permissions": [
+    "sidePanel",
+    "activeTab",
+    "scripting",
+    "webNavigation",
+    "storage",
+    "debugger"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/ui.html"
+  },
+  "action": {
+    "default_title": "Open TS Sidekick",
+    "default_icon": "icon128.png"
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["scripts/content.js"]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["scripts/actions.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

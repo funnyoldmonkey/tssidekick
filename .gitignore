@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.env
+
+# Logs
+*.log
+server/server.log
+crash_report.txt
+
+# Extension
+*.crx
+*.xpi
+
+# Brain Mode
+server/brain_input.json
+server/brain_output.json
+server/current_view.png
+
+# OS
+.DS_Store
+Thumbs.db

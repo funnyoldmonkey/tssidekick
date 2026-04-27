@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>TS Sidekick - Avatar Mode</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --primary: #22c55e;
+            --text: #f8fafc;
+            --accent: #3b82f6;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #334155;
+        }
+        .logo {
+            font-weight: bold;
+            font-size: 1.2rem;
+            color: var(--primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .status-badge {
+            padding: 4px 8px;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            background: #334155;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #64748b;
+        }
+        .status-connected .status-dot {
+            background: var(--primary);
+            box-shadow: 0 0 8px var(--primary);
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.4; }
+            100% { opacity: 1; }
+        }
+        #agent-active-status {
+            background: var(--surface);
+            border-radius: 12px;
+            padding: 16px;
+            border: 1px solid #334155;
+            margin-bottom: 16px;
+        }
+        .active-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            color: #94a3b8;
+            margin-bottom: 8px;
+            letter-spacing: 0.05em;
+        }
+        #current-action-display {
+            font-weight: 500;
+            color: var(--primary);
+            min-height: 1.2em;
+        }
+        .log-container {
+            flex-grow: 1;
+            overflow-y: auto;
+            background: #020617;
+            border-radius: 8px;
+            padding: 12px;
+            font-family: 'Consolas', monospace;
+            font-size: 0.85rem;
+            display: flex;
+            flex-direction: column-reverse;
+        }
+        .log-entry {
+            margin-bottom: 8px;
+            line-height: 1.4;
+            padding-left: 12px;
+            border-left: 2px solid transparent;
+        }
+        .log-status { color: #94a3b8; border-left-color: #334155; }
+        .log-thought { color: #3b82f6; font-style: italic; }
+        .log-info { color: #f8fafc; }
+        
+        .footer-hint {
+            font-size: 0.75rem;
+            color: #64748b;
+            text-align: center;
+            margin-top: 12px;
+            padding-top: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="logo">
+            <span>TS Sidekick</span>
+        </div>
+        <div id="status-indicator" class="status-badge">
+            <div class="status-dot"></div>
+            <span id="status-text">Connecting...</span>
+        </div>
+    </div>
+
+    <div id="agent-active-status">
+        <div class="active-label">Brain Activity</div>
+        <div id="current-action-display">Listening for Brain instructions...</div>
+    </div>
+
+    <div id="log-container" class="log-container">
+        <!-- Logs appear here -->
+    </div>
+
+    <div class="footer-hint">
+        Control this session via Antigravity Chat
+    </div>
+
+    <script src="ui.js"></script>
+</body>
+</html>
