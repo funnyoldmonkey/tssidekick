@@ -1,1 +1,8 @@
 # .gitignore cleared as per user request
+
+# Investigation files
+brain_input.json
+brain_output.json
+current_view.png
+tssidekick_memory.json
+tssidekick_log.txt
