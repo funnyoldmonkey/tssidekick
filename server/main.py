@@ -53,11 +53,24 @@ Respond ONLY with a JSON object in this format:
 }
 """
 
+async def keepalive(websocket: WebSocket, interval: int = 30):
+    """Send a ping every `interval` seconds to keep the WebSocket alive.
+    Prevents Chrome from killing the service worker on idle connections."""
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            await websocket.send_text(json.dumps({"type": "ping"}))
+            logger.debug("Ping sent to extension.")
+    except Exception:
+        pass  # Connection closed — task will be cancelled anyway
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     client_host = websocket.client.host
     logger.info(f"Extension connected from {client_host}")
+    ping_task = asyncio.create_task(keepalive(websocket))
     
     try:
         while True:
@@ -190,7 +203,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         action_data = {"type": "error", "message": "Parse error."}
 
                 if action_data:
-                    logger.info(f"Sending action to Extension: {action_data.get('action')}")
+                    action_name = action_data.get('action')
+                    if action_name == "terminate":
+                        logger.info("Terminate action received. Closing connection.")
+                        await websocket.close()
+                        break
+                    logger.info(f"Sending action to Extension: {action_name}")
                     await websocket.send_text(json.dumps({
                         "type": "action",
                         "tabId": tab_id,
@@ -201,6 +219,9 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.info(f"Extension disconnected from {client_host}")
     except Exception as e:
         logger.error(f"WebSocket Error: {e}")
+    finally:
+        ping_task.cancel()
+        logger.info("Keepalive task cancelled.")
 
 import threading
 from PIL import Image

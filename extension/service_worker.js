@@ -42,6 +42,8 @@ function connectSocket() {
 
     socket.onmessage = async (event) => {
         const msg = JSON.parse(event.data);
+        // Silently drop keepalive pings from server
+        if (msg.type === "ping") return;
         if (msg.type === "command" && msg.action === "observe") {
             const observation = await captureObservation(parseInt(msg.tabId));
             socket.send(jsonStr({
@@ -447,3 +449,16 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 connectSocket();
+
+// ── Service Worker Keepalive ──────────────────────────────────────────────────
+// Chrome suspends service workers after ~5 min of inactivity, killing the
+// WebSocket. We use a chrome.alarms heartbeat every 20s to stay alive.
+chrome.alarms.create("sw_keepalive", { periodInMinutes: 0.333 }); // ~20 seconds
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === "sw_keepalive") {
+        // Touch something to keep the SW alive; also ensure socket stays connected
+        if (!socket || socket.readyState === WebSocket.CLOSED) {
+            connectSocket();
+        }
+    }
+});
