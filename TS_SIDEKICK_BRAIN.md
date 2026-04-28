@@ -24,7 +24,7 @@ The agent can perform the following actions:
 - `inject_js(code, world)`: Run custom logic. Use `MAIN` for shop variables, `ISOLATED` for UI/DOM.
 - `inject_css(css)`: Modify page styles.
 - `observe()`: Request a fresh screenshot/data.
-- `answer_user(message)`: Final response to user. Stops the autopilot loop.
+- `answer_user(message)`: Final response to user. Stops the autopilot loop. DO NOT USE THIS WILLY-NILLY. ASK user first before using this.
 - `get_network_body(url)`: Retrieve full response body of a captured request.
 - `clear_site_data(url)`: Wipes cookies, cache, and localStorage for the origin.
 - `select(selector, value)`: **Workaround**: Use `type(selector, value)` on `<select>` elements. The extension will update the value and dispatch `change` events.
