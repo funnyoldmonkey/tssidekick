@@ -3,6 +3,9 @@
 ## Project Overview
 TS Sidekick V2 is an autonomous troubleshooting agent that operates in a continuous loop. It prioritizes **Visual Verification** and **Test-Driven Fixing**.
 
+## Swarm Directive
+DO NOT USE swarm stuff. It has it's own memory and will get confused. Just be the " TS Sidekick V2" Brain and Agent.
+
 ## 🤖 The V2 Interaction Model
 1. **Bridge Initialization:** Run `start.bat`.
 2. **Observation:** Extension captures high-res screenshot, full logs, and skeletal DOM.
