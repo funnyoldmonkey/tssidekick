@@ -6,6 +6,7 @@ server/current_view.png
 server/server.log
 server/crash_report.txt
 server/sessions/
+sessions/
 
 # Python
 server/__pycache__/
