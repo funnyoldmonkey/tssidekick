@@ -19,3 +19,8 @@ server/__pycache__/
 # Legacy logs
 tssidekick_memory.json
 tssidekick_log.txt
+
+#OpenCode Swarm
+.opencode/
+.swarm/
+scratch/
