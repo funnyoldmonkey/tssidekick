@@ -3,6 +3,7 @@ import asyncio
 import re
 import os
 import base64
+import time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from gemma import gemma_client
 import logging
@@ -25,31 +26,28 @@ app = FastAPI()
 # Store sessions: {tab_id: {"history": [], "model": "gemma-4-31b-it"}}
 sessions = {}
 
-# File paths for Antigravity Brain mode
+# File paths and directories
+SESSIONS_DIR = "sessions"
 BRAIN_INPUT = "brain_input.json"
 BRAIN_OUTPUT = "brain_output.json"
 
-SYSTEM_PROMPT = """You are TS Sidekick, a Tier 2 Support Agent and expert troubleshooter.
-You are running as an autonomous browser agent. Your goal is to identify and fix bugs in the current web page.
+if not os.path.exists(SESSIONS_DIR):
+    os.makedirs(SESSIONS_DIR)
 
-You will receive:
-1. Simplified DOM (Actionable Markdown)
-2. Console Logs (errors/warnings)
-3. Network Data (failed requests/API calls)
-4. URL of the current page
+SYSTEM_PROMPT = """You are TS Sidekick V2, an elite autonomous troubleshooting agent.
+You operate in a continuous loop. Your goal is to identify, fix, and VERIFY issues.
 
-Respond ONLY with a JSON object in this format:
+RULES:
+1. **Autonomous Verification**: Before giving a final answer to the user, you MUST verify your fix. Perform an 'observe' or 'run_test' after your action to confirm the state has changed as expected.
+2. **Visual Audit**: Always use the screenshot to confirm your actions (look for green/orange outlines).
+3. **Continuous Conversation**: Use 'post_message' to communicate with the user. The loop will not stop; it will wait for the user's response or your next action.
+4. **No Truncation**: If you suspect data is missing, use 'get_detailed_dom' or 'get_full_logs'.
+
+Output format:
 {
-  "thought": "Internal scratchpad.",
-  "action": "click" | "type" | "inject_js" | "navigate" | "scroll" | "hover" | "answer_user",
-  "payload": {
-    "selector": "css selector (for click/type/hover)",
-    "text": "text to type",
-    "code": "javascript to inject",
-    "url": "url to navigate to",
-    "x": 0, "y": 500, (for scroll)
-    "message": "Final answer to user"
-  }
+  "thought": "Deep reasoning including verification plan.",
+  "action": "click" | "type" | "inject_js" | "navigate" | "scroll" | "hover" | "post_message" | "observe" | "run_test" | "inspect_element" | "get_network_body" | "clear_site_data" | "capture_element",
+  "payload": { ... }
 }
 """
 
@@ -113,26 +111,44 @@ async def websocket_endpoint(websocket: WebSocket):
                     # ANTIGRAVITY BRAIN MODE
                     logger.info(f"Handing over to Antigravity Brain for Tab {tab_id}...")
                     
-                    # Handle Screenshot
+                    # Handle Screenshot with timestamp
+                    screenshot_rel_path = "current_view.png"
                     if "screenshot" in obs and obs["screenshot"]:
                         try:
+                            timestamp = int(time.time())
                             header, encoded = obs["screenshot"].split(",", 1)
+                            session_path = os.path.join(SESSIONS_DIR, tab_id)
+                            if not os.path.exists(session_path):
+                                os.makedirs(session_path)
+                            
+                            filename = f"view_{timestamp}.png"
+                            filepath = os.path.join(session_path, filename)
+                            with open(filepath, "wb") as f:
+                                f.write(base64.b64decode(encoded))
+                            
+                            # Also update the root current_view.png for easy IDE access
                             with open("current_view.png", "wb") as f:
                                 f.write(base64.b64decode(encoded))
-                            logger.info("Screenshot saved to server/current_view.png")
+                            
+                            screenshot_rel_path = f"sessions/{tab_id}/{filename}"
+                            logger.info(f"Screenshot saved to {filepath}")
                         except Exception as e:
                             logger.error(f"Failed to save screenshot: {e}")
 
                     # Ensure no stale output exists
                     if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
                     
-                    with open(BRAIN_INPUT, "w", encoding="utf-8") as f:
+                    temp_input = f"{BRAIN_INPUT}.tmp"
+                    with open(temp_input, "w", encoding="utf-8") as f:
                         json.dump({
                             "tab_id": tab_id,
                             "query": user_query,
                             "observation": obs,
+                            "screenshot_path": screenshot_rel_path,
                             "history": session["history"]
                         }, f, indent=2)
+                    os.replace(temp_input, BRAIN_INPUT)
+                    logger.info(f"Observation written to {BRAIN_INPUT}")
 
                     logger.info("Waiting for Antigravity Brain response (brain_output.json)...")
                     

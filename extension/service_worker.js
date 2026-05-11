@@ -46,6 +46,7 @@ function connectSocket() {
         if (msg.type === "ping") return;
         if (msg.type === "command" && msg.action === "observe") {
             const observation = await captureObservation(parseInt(msg.tabId));
+            if (sidepanelPort) sidepanelPort.postMessage({ type: "observation_update", data: observation });
             socket.send(jsonStr({
                 type: "observation",
                 tabId: msg.tabId,
@@ -54,6 +55,10 @@ function connectSocket() {
         } else if (msg.type === "action") {
             if (sidepanelPort) sidepanelPort.postMessage({ type: "agent_response", data: msg.data });
             await performAction(parseInt(msg.tabId), msg.data);
+            
+            // Re-capture and update sidepanel after action
+            const observation = await captureObservation(parseInt(msg.tabId));
+            if (sidepanelPort) sidepanelPort.postMessage({ type: "observation_update", data: observation });
         } else if (msg.type === "error") {
             if (sidepanelPort) sidepanelPort.postMessage({ type: "agent_status", message: `Error: ${msg.message}` });
         }
@@ -90,7 +95,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
                 chrome.debugger.sendCommand({ tabId: source.tabId }, "Network.getResponseBody", { requestId }, (result) => {
                     if (result && result.body) {
                         const cleanUrl = response.url.split('?')[0].split('/').pop();
-                        const snippet = result.body.substring(0, 300).replace(/\s+/g, ' ');
+                        const snippet = result.body.substring(0, 2000).replace(/\s+/g, ' ');
                         diagnostics.network.push(`📦 DATA [${cleanUrl}]: ${snippet}...`);
                     }
                 });
@@ -132,10 +137,14 @@ async function captureObservation(tabId) {
             func: () => {
                 const simplify = (el) => {
                     const interactive = ["BUTTON", "A", "INPUT", "SELECT", "TEXTAREA"];
-                    if (interactive.includes(el.tagName) || el.onclick || el.getAttribute('role') === 'button') {
+                    const hasClick = el.onclick || el.getAttribute('role') === 'button' || window.getComputedStyle(el).cursor === 'pointer';
+                    
+                    if (interactive.includes(el.tagName) || hasClick) {
                         const id = el.id ? `#${el.id}` : '';
-                        const text = (el.innerText || el.value || el.title || '').trim().substring(0, 100);
-                        return `[${el.tagName.toLowerCase()}${id} "${text}"]`;
+                        const cls = el.className && typeof el.className === 'string' ? `.${el.className.split(' ').join('.')}` : '';
+                        const text = (el.innerText || el.value || el.title || '').trim().substring(0, 2000); // Increased limit
+                        const type = el.type ? `[type="${el.type}"]` : '';
+                        return `[${el.tagName.toLowerCase()}${id}${cls}${type} "${text}"]`;
                     }
                     return null;
                 };
@@ -149,8 +158,8 @@ async function captureObservation(tabId) {
 
         const pageData = results[0].result;
         
-        const recentLogs = diagnostics.logs.slice(-50).join('\n') || "No console logs.";
-        const recentNetwork = diagnostics.network.slice(-50).join('\n') || "No network issues.";
+        const recentLogs = diagnostics.logs.slice(-1000).join('\n') || "No console logs.";
+        const recentNetwork = diagnostics.network.slice(-1000).join('\n') || "No network issues.";
 
         let screenshot = null;
         try {
@@ -179,12 +188,21 @@ async function performAction(tabId, actionData) {
     
     try {
         if (action === "inject_js") {
-            // Use ISOLATED world by default for UI, MAIN only if explicitly requested
-            await chrome.scripting.executeScript({
-                target: { tabId },
-                world: payload.world || 'ISOLATED',
-                func: (code) => { try { eval(code); } catch(e) { console.error(e); } },
-                args: [payload.code]
+            // Use chrome.debugger to bypass CSP and allow MAIN world access without eval() issues
+            await new Promise((resolve) => {
+                chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+                    expression: payload.code,
+                    userGesture: true,
+                    awaitPromise: true
+                }, (result) => {
+                    if (chrome.runtime.lastError) {
+                        diagnostics.logs.push(`[error] Debugger injection failed: ${chrome.runtime.lastError.message}`);
+                    } else if (result && result.exceptionDetails) {
+                        const err = result.exceptionDetails.exception.description || "Unknown Error";
+                        diagnostics.logs.push(`[error] Script exception: ${err}`);
+                    }
+                    resolve();
+                });
             });
         } else if (action === "click") {
             await chrome.scripting.executeScript({
@@ -315,30 +333,90 @@ async function performAction(tabId, actionData) {
                 args: [payload.x, payload.y]
             });
             diagnostics.logs.push(`🖱️ CLICK AT POSITION: ${payload.x}, ${payload.y}`);
-        } else if (action === "get_computed_style") {
-            const styles = await chrome.scripting.executeScript({
+        } else if (action === "inspect_element") {
+            const data = await chrome.scripting.executeScript({
                 target: { tabId },
-                func: (sel, props) => {
+                func: (sel) => {
                     const el = document.querySelector(sel);
                     if (!el) return "NOT_FOUND";
+                    const r = el.getBoundingClientRect();
                     const computed = window.getComputedStyle(el);
-                    const result = {};
-                    props.forEach(p => result[p] = computed.getPropertyValue(p));
-                    return result;
+                    return {
+                        tag: el.tagName,
+                        id: el.id,
+                        classes: el.className,
+                        value: el.value,
+                        rect: { x: r.left, y: r.top, w: r.width, h: r.height },
+                        styles: {
+                            display: computed.display,
+                            visibility: computed.visibility,
+                            opacity: computed.opacity,
+                            color: computed.color,
+                            fontSize: computed.fontSize,
+                            zIndex: computed.zIndex
+                        },
+                        attributes: Array.from(el.attributes).reduce((acc, attr) => {
+                            acc[attr.name] = attr.value;
+                            return acc;
+                        }, {})
+                    };
                 },
-                args: [payload.selector, payload.properties || []]
+                args: [payload.selector]
             });
-            diagnostics.logs.push(`>>> COMPUTED_STYLE [${payload.selector}]: ${JSON.stringify(styles[0].result)}`);
-        } else if (action === "observe") {
-            // Just capture observation below
+            diagnostics.logs.push(`>>> INSPECT [${payload.selector}]: ${JSON.stringify(data[0].result)}`);
+        } else if (action === "post_message") {
+            // Forward message to user via sidepanel
+            if (sidepanelPort) sidepanelPort.postMessage({ type: "agent_message", text: payload.message });
+            diagnostics.logs.push(`>>> AGENT MESSAGE: ${payload.message}`);
+        } else if (action === "run_test") {
+            const result = await new Promise((resolve) => {
+                chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+                    expression: `(function(){ try { ${payload.code} \n return { success: true, message: "Test Passed" }; } catch(e) { return { success: false, message: e.message }; } })()`,
+                    returnByValue: true
+                }, (res) => {
+                    if (chrome.runtime.lastError) resolve({ success: false, message: chrome.runtime.lastError.message });
+                    else resolve(res.result.value);
+                });
+            });
+            diagnostics.logs.push(`>>> TEST_RESULT: ${JSON.stringify(result)}`);
+        } else if (action === "get_network_body") {
+            const requestId = networkRequests[payload.url];
+            if (requestId) {
+                const body = await new Promise((resolve) => {
+                    chrome.debugger.sendCommand({ tabId }, "Network.getResponseBody", { requestId }, (res) => {
+                        if (chrome.runtime.lastError) resolve(`Error: ${chrome.runtime.lastError.message}`);
+                        else resolve(res.body);
+                    });
+                });
+                diagnostics.logs.push(`>>> NETWORK_BODY [${payload.url}]: ${body.substring(0, 5000)}`);
+            } else {
+                diagnostics.logs.push(`>>> NETWORK_BODY [${payload.url}]: NOT_FOUND`);
+            }
+        } else if (action === "clear_site_data") {
+            const tab = await chrome.tabs.get(tabId);
+            await new Promise((resolve) => {
+                chrome.debugger.sendCommand({ tabId }, "Storage.clearDataForOrigin", {
+                    origin: new URL(payload.url || tab.url).origin,
+                    storageTypes: "cookies,local_storage,indexeddb,cache_storage"
+                }, () => resolve());
+            });
+            diagnostics.logs.push(`>>> SITE DATA CLEARED for ${payload.url || tab.url}`);
+        } else if (action === "answer_user") {
+            // V1 Compatibility
+            if (sidepanelPort) sidepanelPort.postMessage({ type: "agent_message", text: payload.message });
         }
     } catch (e) {
         console.error("Action execution failed:", e);
+        diagnostics.logs.push(`[error] Action ${action} failed: ${e.message}`);
     }
 
-    if (action === "answer_user") return;
-
-    await new Promise(r => setTimeout(r, 2500));
+    // Keep the loop continuous even after messaging
+    if (action === "answer_user" || action === "post_message") {
+         // We might want to wait for user input here, but for now let's just observe after a delay
+         await new Promise(r => setTimeout(r, 5000));
+    } else {
+        await new Promise(r => setTimeout(r, 2500));
+    }
 
     if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(jsonStr({

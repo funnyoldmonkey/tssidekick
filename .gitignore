@@ -1,10 +1,21 @@
-# .gitignore cleared as per user request
-
-# Investigation files (server sidecar)
+# TS Sidekick Transient Files
 server/brain_input.json
 server/brain_output.json
 server/heartbeat.txt
 server/current_view.png
 server/server.log
+server/crash_report.txt
+server/sessions/
+
+# Python
+server/__pycache__/
+*.pyc
+
+# Environment & IDE
+.env
+.vscode/
+.idea/
+
+# Legacy logs
 tssidekick_memory.json
 tssidekick_log.txt
