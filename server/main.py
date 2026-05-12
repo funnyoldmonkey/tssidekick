@@ -8,6 +8,7 @@ import hashlib
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from gemma import gemma_client
 import logging
+import codecs
 import sys
 
 # Setup logging to file
@@ -40,8 +41,37 @@ LOCAL_ACTIONS = {"search_dom", "search_console", "search_network", "read_network
 # Max history turns to keep (prevents free-tier context overflow)
 MAX_HISTORY_TURNS = 20
 
+# How often to nudge the Brain to re-read the full playbook
+BRAIN_REREAD_INTERVAL = 4
+
 for d in [SESSIONS_DIR, SCRATCH_DIR, SCRATCH_NET_BODIES]:
     os.makedirs(d, exist_ok=True)
+
+
+def read_json_file(filepath):
+    """Read a JSON file with automatic encoding detection.
+    Handles UTF-8, UTF-8 with BOM, UTF-16 LE/BE, and other encodings
+    that IDEs may use when writing brain_output.json."""
+    with open(filepath, "rb") as f:
+        raw = f.read()
+
+    # Detect and strip BOM, determine encoding
+    for bom, encoding in [
+        (codecs.BOM_UTF32_LE, "utf-32-le"),
+        (codecs.BOM_UTF32_BE, "utf-32-be"),
+        (codecs.BOM_UTF16_LE, "utf-16-le"),
+        (codecs.BOM_UTF16_BE, "utf-16-be"),
+        (codecs.BOM_UTF8, "utf-8-sig"),
+    ]:
+        if raw.startswith(bom):
+            text = raw.decode(encoding)
+            # utf-8-sig auto-strips BOM; for others, strip manually
+            if encoding != "utf-8-sig":
+                text = raw[len(bom):].decode(encoding)
+            return json.loads(text)
+
+    # No BOM — try UTF-8 (most common)
+    return json.loads(raw.decode("utf-8"))
 
 SYSTEM_PROMPT = """You are TS Sidekick V2, an elite autonomous Tier 2 support agent.
 You operate in a continuous loop. Your goal is to diagnose issues, fix them, VERIFY the fix, and only THEN report to the user.
@@ -277,16 +307,29 @@ def handle_local_search(action_name, payload):
 
 
 def _grep_file(filepath, query):
-    """Search a file for lines matching a query (case-insensitive)."""
+    """Search a file for lines matching a query (case-insensitive).
+    Supports pipe-separated OR queries (e.g., 'preorder|location|inventory')
+    and falls back to regex if the query contains regex metacharacters."""
     if not os.path.exists(filepath):
         return {"error": f"File not found: {filepath}", "matches": []}
 
     matches = []
     try:
+        # Support pipe-separated OR queries and regex patterns
+        try:
+            pattern = re.compile(query, re.IGNORECASE)
+            use_regex = True
+        except re.error:
+            use_regex = False
+
         with open(filepath, "r", encoding="utf-8") as f:
             for i, line in enumerate(f, 1):
-                if query.lower() in line.lower():
-                    matches.append({"line": i, "content": line.rstrip()})
+                if use_regex:
+                    if pattern.search(line):
+                        matches.append({"line": i, "content": line.rstrip()})
+                else:
+                    if query.lower() in line.lower():
+                        matches.append({"line": i, "content": line.rstrip()})
     except Exception as e:
         return {"error": str(e), "matches": []}
 
@@ -545,6 +588,31 @@ def cross_reference_diagnostics():
     return diagnosis
 
 
+# ── Brain Rules Reminder ────────────────────────────────────────────────────
+
+def build_rules_reminder(session):
+    """Build the _rules block for brain_input.json.
+    Every turn gets the compact cheat sheet.
+    Every BRAIN_REREAD_INTERVAL turns, add a nudge to re-read the full playbook."""
+    if "turn_count" not in session:
+        session["turn_count"] = 0
+    session["turn_count"] += 1
+
+    rules = {
+        "tools": "ONLY use actions via server/brain_output.json. NEVER use Chrome MCPs, Puppeteer, browser_use, or any external browser tool.",
+        "files": "ONLY read: server/brain_input.json, server/brain_output.json, server/current_view.png, scratch/ files. NEVER open server/main.py, extension/, .swarm/, README.md, or any source code.",
+        "workflow": "diagnose → search → fix → VERIFY via screenshot+DOM → if not fixed, try DIFFERENT approach → after 3 failures, post_message to user.",
+        "selectors": "Use RESILIENT selectors (class, attribute, data-*). NEVER use template-specific IDs in delivered fix code.",
+        "silence": "Do NOT post_message until fix is VERIFIED working or 3+ attempts exhausted."
+    }
+
+    if session["turn_count"] % BRAIN_REREAD_INTERVAL == 0:
+        rules["⚠️ REFRESH"] = "You have been working for several turns. Re-read TS_SIDEKICK_BRAIN.md now to ensure you are following the full protocol. Do not skip this."
+        logger.info(f"Turn {session['turn_count']}: Brain reread nudge added to _rules")
+
+    return rules
+
+
 # ── Fix Attempt Tracking ─────────────────────────────────────────────────────
 
 def record_fix_attempt(session, action_data):
@@ -693,7 +761,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         "query": user_query,
                         "observation": slim_obs,
                         "screenshot_path": screenshot_rel_path,
-                        "history": session["history"]
+                        "history": session["history"],
+                        "_rules": build_rules_reminder(session)
                     }
 
                     # Include fix attempt summary if any attempts have been made
@@ -716,9 +785,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     retries = 5
                     while retries > 0:
                         try:
-                            with open(BRAIN_OUTPUT, "r", encoding="utf-8") as f:
-                                action_data = json.load(f)
-                            
+                            action_data = read_json_file(BRAIN_OUTPUT)
+
                             # SCRIPT TUNNEL: Handle code_file if specified
                             if action_data.get("action") == "inject_js" and "payload" in action_data:
                                 payload = action_data["payload"]
@@ -732,7 +800,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                         os.remove(script_filename)
                             
                             os.remove(BRAIN_OUTPUT)
-                            os.remove(BRAIN_INPUT)
+                            # Keep brain_input.json — IDE may still need to read it.
+                            # It will be overwritten by the next observation cycle.
                             break # Success
                         except (json.JSONDecodeError, PermissionError) as e:
                             retries -= 1
@@ -740,14 +809,12 @@ async def websocket_endpoint(websocket: WebSocket):
                                 logger.error(f"Error reading brain_output.json after retries: {e}")
                                 action_data = {"thought": "Error reading brain file.", "action": "answer_user", "payload": {"message": f"Tunnel error: {str(e)}"}}
                                 if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
-                                if os.path.exists(BRAIN_INPUT): os.remove(BRAIN_INPUT)
                             else:
                                 await asyncio.sleep(0.2)
                         except Exception as e:
                             logger.error(f"Unexpected error reading brain_output.json: {e}")
                             action_data = {"thought": "Error reading brain file.", "action": "answer_user", "payload": {"message": f"Tunnel error: {str(e)}"}}
                             if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
-                            if os.path.exists(BRAIN_INPUT): os.remove(BRAIN_INPUT)
                             break
 
                 else:
@@ -782,11 +849,15 @@ async def websocket_endpoint(websocket: WebSocket):
                         await websocket.close()
                         break
 
-                    # ── LOCAL ACTION ROUTING ──────────────────────────────
+                    # ── LOCAL ACTION LOOP ─────────────────────────────────
                     # Search/read actions are handled server-side without
                     # roundtripping to the extension. Results go straight
                     # back into brain_input.json for the next Brain turn.
-                    if action_name in LOCAL_ACTIONS:
+                    # Loop handles unlimited consecutive local actions.
+                    MAX_LOCAL_CHAINS = 15  # Safety cap to prevent infinite loops
+                    local_chain_count = 0
+
+                    while action_name in LOCAL_ACTIONS and local_chain_count < MAX_LOCAL_CHAINS:
                         if action_name == "refresh_files":
                             # This one DOES need the extension — request a fresh observe
                             logger.info("refresh_files requested, triggering re-observe...")
@@ -795,8 +866,10 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "action": "observe",
                                 "tabId": tab_id
                             }))
+                            break  # Exit loop — extension will send a new observation
                         else:
-                            logger.info(f"Handling local action: {action_name}")
+                            local_chain_count += 1
+                            logger.info(f"Handling local action ({local_chain_count}): {action_name}")
                             search_results = handle_local_search(action_name, action_data.get("payload", {}))
 
                             # Write results directly to brain_input.json — no extension involved
@@ -809,20 +882,21 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "search_results": search_results,
                                     "action_performed": action_name,
                                     "screenshot_path": screenshot_rel_path,
-                                    "history": session["history"]
+                                    "history": session["history"],
+                                    "_rules": build_rules_reminder(session)
                                 }, f, indent=2)
                             os.replace(temp_input, BRAIN_INPUT)
                             logger.info(f"Search results written to {BRAIN_INPUT}, waiting for next Brain action...")
 
-                            # Now wait for the Brain's next response (same polling loop)
+                            # Wait for the Brain's next response
                             while not os.path.exists(BRAIN_OUTPUT):
                                 await asyncio.sleep(0.5)
 
                             retries = 5
                             while retries > 0:
                                 try:
-                                    with open(BRAIN_OUTPUT, "r", encoding="utf-8") as f:
-                                        action_data = json.load(f)
+                                    action_data = read_json_file(BRAIN_OUTPUT)
+                                    # SCRIPT TUNNEL: Handle code_file if specified
                                     if action_data.get("action") == "inject_js" and "payload" in action_data:
                                         payload = action_data["payload"]
                                         if "code_file" in payload:
@@ -832,56 +906,29 @@ async def websocket_endpoint(websocket: WebSocket):
                                                     payload["code"] = sf.read()
                                                 os.remove(script_filename)
                                     os.remove(BRAIN_OUTPUT)
-                                    os.remove(BRAIN_INPUT)
+                                    # Keep brain_input.json for IDE access
                                     break
                                 except (json.JSONDecodeError, PermissionError) as e:
                                     retries -= 1
                                     if retries == 0:
                                         action_data = {"thought": "Error reading brain file.", "action": "post_message", "payload": {"message": f"Tunnel error: {str(e)}"}}
                                         if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
-                                        if os.path.exists(BRAIN_INPUT): os.remove(BRAIN_INPUT)
                                     else:
                                         await asyncio.sleep(0.2)
                                 except Exception as e:
                                     action_data = {"thought": "Error reading brain file.", "action": "post_message", "payload": {"message": f"Tunnel error: {str(e)}"}}
                                     if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
-                                    if os.path.exists(BRAIN_INPUT): os.remove(BRAIN_INPUT)
                                     break
 
-                            # After search → Brain might issue another local action or a browser action
-                            # If it's another local action, we need to recurse (but for safety, send to extension)
+                            # Update action_name for the loop check
                             action_name = action_data.get('action')
-                            if action_name in LOCAL_ACTIONS and action_name != "refresh_files":
-                                # One more local round, then force to extension
-                                logger.info(f"Chained local action: {action_name}")
-                                search_results = handle_local_search(action_name, action_data.get("payload", {}))
-                                if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
-                                temp_input = f"{BRAIN_INPUT}.tmp"
-                                with open(temp_input, "w", encoding="utf-8") as f:
-                                    json.dump({
-                                        "tab_id": tab_id,
-                                        "query": session.get("user_query"),
-                                        "search_results": search_results,
-                                        "action_performed": action_name,
-                                        "screenshot_path": screenshot_rel_path,
-                                        "history": session["history"]
-                                    }, f, indent=2)
-                                os.replace(temp_input, BRAIN_INPUT)
-                                # Wait for brain again
-                                while not os.path.exists(BRAIN_OUTPUT):
-                                    await asyncio.sleep(0.5)
-                                try:
-                                    with open(BRAIN_OUTPUT, "r", encoding="utf-8") as f:
-                                        action_data = json.load(f)
-                                    os.remove(BRAIN_OUTPUT)
-                                    os.remove(BRAIN_INPUT)
-                                except Exception:
-                                    action_data = {"thought": "Chain error.", "action": "post_message", "payload": {"message": "Search chain error."}}
-                                    if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
-                                    if os.path.exists(BRAIN_INPUT): os.remove(BRAIN_INPUT)
+
+                    if local_chain_count >= MAX_LOCAL_CHAINS:
+                        logger.warning(f"Local action chain hit safety cap ({MAX_LOCAL_CHAINS})")
+                        action_data = {"thought": "Too many consecutive search actions.", "action": "post_message", "payload": {"message": "Hit the local action chain limit. Try a browser action next."}}
+                        action_name = "post_message"
 
                     # ── BROWSER ACTION → EXTENSION ────────────────────────
-                    action_name = action_data.get('action')
                     if action_name and action_name not in LOCAL_ACTIONS:
                         # Track fix attempts for inject_js and inject_css
                         if action_name in ("inject_js", "inject_css"):
