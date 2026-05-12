@@ -34,9 +34,11 @@ BRAIN_INPUT = "brain_input.json"
 BRAIN_OUTPUT = "brain_output.json"
 SCRATCH_DIR = os.path.join(os.path.dirname(__file__), "..", "scratch")
 SCRATCH_NET_BODIES = os.path.join(SCRATCH_DIR, "obs_net_bodies")
+KB_DIR = os.path.join(os.path.dirname(__file__), "..", "kb")
+KB_FIXES_LOG = os.path.join(KB_DIR, "fixes.log")
 
 # Local search actions that don't need the extension
-LOCAL_ACTIONS = {"search_dom", "search_console", "search_network", "read_network_body", "refresh_files", "diagnose"}
+LOCAL_ACTIONS = {"search_dom", "search_console", "search_network", "read_network_body", "refresh_files", "diagnose", "log_fix"}
 
 # Max history turns to keep (prevents free-tier context overflow)
 MAX_HISTORY_TURNS = 20
@@ -44,7 +46,7 @@ MAX_HISTORY_TURNS = 20
 # How often to nudge the Brain to re-read the full playbook
 BRAIN_REREAD_INTERVAL = 4
 
-for d in [SESSIONS_DIR, SCRATCH_DIR, SCRATCH_NET_BODIES]:
+for d in [SESSIONS_DIR, SCRATCH_DIR, SCRATCH_NET_BODIES, KB_DIR]:
     os.makedirs(d, exist_ok=True)
 
 
@@ -302,6 +304,15 @@ def handle_local_search(action_name, payload):
 
     elif action_name == "diagnose":
         return cross_reference_diagnostics()
+
+    elif action_name == "log_fix":
+        # Accept entry from multiple possible payload fields (brain may use different keys)
+        entry = payload.get("entry", "") or payload.get("message", "") or payload.get("text", "") or payload.get("content", "")
+        if not entry:
+            logger.warning(f"⚠️ log_fix called but no entry found. Payload keys: {list(payload.keys())}")
+            return {"error": f"No entry provided. Payload must include 'entry' with the formatted fix log text. Received keys: {list(payload.keys())}"}
+        logger.info(f"📝 log_fix received entry ({len(entry)} chars)")
+        return append_fix_to_kb(entry)
 
     return {"error": f"Unknown local action: {action_name}"}
 
@@ -588,6 +599,77 @@ def cross_reference_diagnostics():
     return diagnosis
 
 
+# ── Knowledge Base (fixes.log) ─────────────────────────────────────────────
+
+def append_fix_to_kb(entry_text):
+    """Append a verified fix entry to kb/fixes.log."""
+    try:
+        with open(KB_FIXES_LOG, "a", encoding="utf-8") as f:
+            f.write(entry_text.strip() + "\n")
+        logger.info(f"📝 Fix logged to {KB_FIXES_LOG}")
+        return {"success": True, "message": "Fix logged to knowledge base."}
+    except Exception as e:
+        logger.error(f"Failed to write to fixes.log: {e}")
+        return {"success": False, "error": str(e)}
+
+
+def find_relevant_fixes(scenario, url):
+    """Search kb/fixes.log for entries matching the scenario or URL domain.
+    Returns the 5 most recent matching entries."""
+    if not os.path.exists(KB_FIXES_LOG):
+        return []
+
+    try:
+        with open(KB_FIXES_LOG, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception:
+        return []
+
+    if not content.strip():
+        return []
+
+    # Split into individual entries (separated by ---)
+    entries = []
+    current = []
+    for line in content.split('\n'):
+        if line.strip() == '---':
+            if current:
+                entries.append('\n'.join(current))
+                current = []
+        else:
+            current.append(line)
+    if current:
+        entries.append('\n'.join(current))
+
+    # Build search terms
+    search_terms = []
+    if scenario and scenario != "GENERAL":
+        search_terms.append(scenario.lower())
+
+    # Extract domain from URL
+    if url:
+        try:
+            from urllib.parse import urlparse
+            domain = urlparse(url).netloc.replace('www.', '')
+            if domain:
+                search_terms.append(domain.lower())
+        except Exception:
+            pass
+
+    if not search_terms:
+        return []
+
+    # Find matching entries
+    matches = []
+    for entry in entries:
+        entry_lower = entry.lower()
+        if any(term in entry_lower for term in search_terms):
+            matches.append(entry.strip())
+
+    # Return last 5 (most recent since file is append-only)
+    return matches[-5:]
+
+
 # ── Brain Rules Reminder ────────────────────────────────────────────────────
 
 def build_rules_reminder(session):
@@ -601,9 +683,10 @@ def build_rules_reminder(session):
     rules = {
         "tools": "ONLY use actions via server/brain_output.json. NEVER use Chrome MCPs, Puppeteer, browser_use, or any external browser tool.",
         "files": "ONLY read: server/brain_input.json, server/brain_output.json, server/current_view.png, scratch/ files. NEVER open server/main.py, extension/, .swarm/, README.md, or any source code.",
-        "workflow": "diagnose → search → fix → VERIFY via screenshot+DOM → if not fixed, try DIFFERENT approach → after 3 failures, post_message to user.",
+        "workflow": "diagnose → search → fix → VERIFY via screenshot+DOM → if not fixed, try DIFFERENT approach → after 3 failures, report to user in IDE chat.",
         "selectors": "Use RESILIENT selectors (class, attribute, data-*). NEVER use template-specific IDs in delivered fix code.",
-        "silence": "Do NOT post_message until fix is VERIFIED working or 3+ attempts exhausted."
+        "silence": "Do NOT respond in the IDE until fix is VERIFIED working or 3+ attempts exhausted. NEVER use post_message — all communication in IDE chat only.",
+        "closure": "After delivering a fix, you MUST ask the user 'Is everything looking good? Can I close out this session?' and WAIT for confirmation before writing log_fix. NEVER skip this step."
     }
 
     if session["turn_count"] % BRAIN_REREAD_INTERVAL == 0:
@@ -770,6 +853,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     if fix_summary:
                         brain_payload["previous_fix_attempts"] = fix_summary
 
+                    # Include relevant past fixes from knowledge base
+                    obs_url = obs.get("url", "")
+                    detected_scenario = session.get("detected_scenario", "")
+                    relevant = find_relevant_fixes(detected_scenario, obs_url)
+                    if relevant:
+                        brain_payload["relevant_fixes"] = relevant
+                        logger.info(f"📚 KB match found: {len(relevant)} relevant past fix(es) fed to brain_input.json")
+
                     temp_input = f"{BRAIN_INPUT}.tmp"
                     with open(temp_input, "w", encoding="utf-8") as f:
                         json.dump(brain_payload, f, indent=2)
@@ -872,19 +963,33 @@ async def websocket_endpoint(websocket: WebSocket):
                             logger.info(f"Handling local action ({local_chain_count}): {action_name}")
                             search_results = handle_local_search(action_name, action_data.get("payload", {}))
 
+                            # Stash detected scenario from diagnose results
+                            if action_name == "diagnose" and isinstance(search_results, dict):
+                                session["detected_scenario"] = search_results.get("detected_scenario", "")
+
                             # Write results directly to brain_input.json — no extension involved
                             if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
+                            search_payload = {
+                                "tab_id": tab_id,
+                                "query": session.get("user_query"),
+                                "search_results": search_results,
+                                "action_performed": action_name,
+                                "screenshot_path": screenshot_rel_path,
+                                "history": session["history"],
+                                "_rules": build_rules_reminder(session)
+                            }
+
+                            # Include relevant past fixes from knowledge base
+                            obs_url = obs.get("url", "") if obs else ""
+                            detected_scenario = session.get("detected_scenario", "")
+                            relevant = find_relevant_fixes(detected_scenario, obs_url)
+                            if relevant:
+                                search_payload["relevant_fixes"] = relevant
+                                logger.info(f"📚 KB match found: {len(relevant)} relevant past fix(es) fed to brain_input.json")
+
                             temp_input = f"{BRAIN_INPUT}.tmp"
                             with open(temp_input, "w", encoding="utf-8") as f:
-                                json.dump({
-                                    "tab_id": tab_id,
-                                    "query": session.get("user_query"),
-                                    "search_results": search_results,
-                                    "action_performed": action_name,
-                                    "screenshot_path": screenshot_rel_path,
-                                    "history": session["history"],
-                                    "_rules": build_rules_reminder(session)
-                                }, f, indent=2)
+                                json.dump(search_payload, f, indent=2)
                             os.replace(temp_input, BRAIN_INPUT)
                             logger.info(f"Search results written to {BRAIN_INPUT}, waiting for next Brain action...")
 

@@ -1,0 +1,8 @@
+---
+[2026-05-12 19:17] store: built-by-jall.myshopify.com
+scenario: SHOPIFY_APP
+tags: inline-important, price-hidden, bis-button, error-overlay
+root_cause: Back in Stock app script failed to load pricing data, hiding the price and disabling the button.
+fix: inject_js — Restored price container display, removed error overlay, and re-enabled BIS trigger button using !important overrides.
+attempts: 1
+---
