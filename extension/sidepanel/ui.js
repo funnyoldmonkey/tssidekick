@@ -39,11 +39,11 @@ function updateStatus(connected) {
         // AUTO-START: Tell the Brain we are ready on this tab
         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
             if (tabs[0]) {
-                port.postMessage({ 
-                    type: "start_agent", 
-                    tabId: tabs[0].id, 
-                    query: "Autonomous Observation", 
-                    model: "antigravity" 
+                port.postMessage({
+                    type: "start_agent",
+                    tabId: tabs[0].id,
+                    query: "Autonomous Observation",
+                    model: "antigravity"
                 });
             }
         });
@@ -57,13 +57,13 @@ function updateStatus(connected) {
 function addLog(message, type = "info") {
     const entry = document.createElement('div');
     entry.className = `log-entry log-${type}`;
-    
+
     if (type === "thought") {
         entry.innerHTML = `<span class="log-thought">${message}</span>`;
     } else {
         entry.innerText = message;
     }
-    
+
     logContainer.prepend(entry);
 }
 
@@ -71,7 +71,7 @@ function handleAgentResponse(data) {
     if (data.thought) {
         addLog(data.thought, "thought");
     }
-    
+
     if (data.action) {
         const actionLabels = {
             "click": `Clicking: ${data.payload.selector}`,
@@ -87,10 +87,10 @@ function handleAgentResponse(data) {
             "get_network_body": `Fetching Network Body: ${data.payload.url}`,
             "clear_site_data": "Clearing Site Data & Cookies..."
         };
-        const label = actionLabels[data.action] || `TS Sidekick: ${data.action}`;
+        const label = actionLabels[data.action] || `TS Sidekick V2: ${data.action}`;
         addLog(label, "status");
         actionDisplay.innerText = label;
-        
+
         // Hide chat when a new action starts, unless it's a message
         if (data.action !== "post_message" && data.action !== "answer_user") {
             agentChat.style.display = "none";

@@ -1,4 +1,4 @@
-console.log("Gemma Sidekick Content Script Loaded.");
+console.log("TS Sidekick V2 Content Script Loaded.");
 
 // Listener for simple interactions if needed
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {

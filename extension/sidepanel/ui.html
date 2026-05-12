@@ -1,8 +1,9 @@
 <!DOCTYPE html>
 <html>
+
 <head>
     <meta charset="UTF-8">
-    <title>TS Sidekick - Avatar Mode</title>
+    <title>TS Sidekick V2 - Avatar Mode</title>
     <style>
         :root {
             --bg: #0f172a;
@@ -11,6 +12,7 @@
             --text: #f8fafc;
             --accent: #3b82f6;
         }
+
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background-color: var(--bg);
@@ -23,6 +25,7 @@
             overflow: hidden;
             box-sizing: border-box;
         }
+
         .header {
             display: flex;
             align-items: center;
@@ -31,6 +34,7 @@
             padding-bottom: 12px;
             border-bottom: 1px solid #334155;
         }
+
         .logo {
             font-weight: bold;
             font-size: 1.2rem;
@@ -39,6 +43,7 @@
             align-items: center;
             gap: 8px;
         }
+
         .status-badge {
             padding: 4px 8px;
             border-radius: 999px;
@@ -48,22 +53,34 @@
             align-items: center;
             gap: 6px;
         }
+
         .status-dot {
             width: 8px;
             height: 8px;
             border-radius: 50%;
             background: #64748b;
         }
+
         .status-connected .status-dot {
             background: var(--primary);
             box-shadow: 0 0 8px var(--primary);
             animation: pulse 2s infinite;
         }
+
         @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.4; }
-            100% { opacity: 1; }
+            0% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.4;
+            }
+
+            100% {
+                opacity: 1;
+            }
         }
+
         #agent-active-status {
             background: var(--surface);
             border-radius: 12px;
@@ -71,6 +88,7 @@
             border: 1px solid #334155;
             margin-bottom: 16px;
         }
+
         .active-label {
             font-size: 0.7rem;
             text-transform: uppercase;
@@ -78,11 +96,13 @@
             margin-bottom: 8px;
             letter-spacing: 0.05em;
         }
+
         #current-action-display {
             font-weight: 500;
             color: var(--primary);
             min-height: 1.2em;
         }
+
         .log-container {
             flex-grow: 1;
             overflow-y: auto;
@@ -94,22 +114,38 @@
             font-size: 0.85rem;
             display: flex;
             flex-direction: column-reverse;
-            scrollbar-width: none; /* Firefox */
-            -ms-overflow-style: none; /* IE/Edge */
+            scrollbar-width: none;
+            /* Firefox */
+            -ms-overflow-style: none;
+            /* IE/Edge */
         }
+
         .log-container::-webkit-scrollbar {
-            display: none; /* Chrome/Safari/Opera */
+            display: none;
+            /* Chrome/Safari/Opera */
         }
+
         .log-entry {
             margin-bottom: 8px;
             line-height: 1.4;
             padding-left: 12px;
             border-left: 2px solid transparent;
         }
-        .log-status { color: #94a3b8; border-left-color: #334155; }
-        .log-thought { color: #3b82f6; font-style: italic; }
-        .log-info { color: #f8fafc; }
-        
+
+        .log-status {
+            color: #94a3b8;
+            border-left-color: #334155;
+        }
+
+        .log-thought {
+            color: #3b82f6;
+            font-style: italic;
+        }
+
+        .log-info {
+            color: #f8fafc;
+        }
+
         .footer-hint {
             font-size: 0.7rem;
             color: #475569;
@@ -120,6 +156,7 @@
             border-top: 1px solid #1e293b;
             flex-shrink: 0;
         }
+
         .footer-hint .author-name {
             font-weight: 700;
             font-size: 0.8rem;
@@ -128,6 +165,7 @@
             -webkit-text-fill-color: transparent;
             background-clip: text;
         }
+
         .visual-monitor {
             background: #020617;
             border-radius: 8px;
@@ -140,22 +178,25 @@
             justify-content: center;
             position: relative;
         }
+
         #screenshot-preview {
             max-width: 100%;
             max-height: 100%;
             object-fit: contain;
         }
+
         .monitor-label {
             position: absolute;
             top: 8px;
             left: 8px;
-            background: rgba(0,0,0,0.6);
+            background: rgba(0, 0, 0, 0.6);
             color: var(--primary);
             font-size: 0.6rem;
             padding: 2px 6px;
             border-radius: 4px;
             text-transform: uppercase;
         }
+
         #agent-chat {
             background: var(--surface);
             border-radius: 12px;
@@ -164,6 +205,7 @@
             border-left: 4px solid var(--accent);
             display: none;
         }
+
         #agent-message-text {
             font-size: 0.9rem;
             line-height: 1.5;
@@ -171,10 +213,11 @@
         }
     </style>
 </head>
+
 <body>
     <div class="header">
         <div class="logo">
-            <span>TS Sidekick</span>
+            <span>TS Sidekick V2</span>
         </div>
         <div id="status-indicator" class="status-badge">
             <div class="status-dot"></div>
@@ -207,4 +250,5 @@
 
     <script src="ui.js"></script>
 </body>
+
 </html>

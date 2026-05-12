@@ -25,7 +25,7 @@
     "default_path": "sidepanel/ui.html"
   },
   "action": {
-    "default_title": "Open TS Sidekick",
+    "default_title": "Open TS Sidekick V2",
     "default_icon": "icon128.png"
   },
   "icons": {
