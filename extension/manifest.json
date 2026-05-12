@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "TS Sidekick",
-  "version": "1.0",
-  "description": "Agentic Troubleshooting Sidekick powered by Gemma 4",
+  "name": "TS Sidekick V2",
+  "version": "2.0",
+  "description": "Autonomous Troubleshooting Sidekick",
   "permissions": [
     "sidePanel",
     "activeTab",
@@ -35,14 +35,22 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["scripts/content.js"]
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "scripts/content.js"
+      ]
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["scripts/actions.js"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "scripts/actions.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ]
 }
