@@ -554,11 +554,43 @@ def cross_reference_diagnostics():
     if any(s.get("network_status") == "FAILED" for s in diagnosis["scripts"]):
         scenario_scores["WIDGET_NOT_SHOWING"] += 3
 
+    # CSS/Layout signals — console errors about styling, positioning, visibility
+    css_keywords = ['css', 'layout', 'overflow', 'z-index', 'position', 'visibility', 'opacity', 'hidden', 'misaligned', 'off-screen', 'clipped', 'collapsed']
+    css_console_hits = sum(1 for e in diagnosis["console_errors"] if any(kw in e["message"].lower() for kw in css_keywords))
+    if css_console_hits:
+        scenario_scores["CSS_LAYOUT"] += min(css_console_hits * 2, 8)  # stacks up to +8
+    # Multiple hidden elements is a strong CSS/layout signal
+    if len(diagnosis["hidden_elements"]) > 3:
+        scenario_scores["CSS_LAYOUT"] += 2
+    if len(diagnosis["hidden_elements"]) > 8:
+        scenario_scores["CSS_LAYOUT"] += 2
+
+    # SHOPIFY_APP — only scores on actual app-interference signals, NOT platform alone
     if detected_platform == "shopify":
-        scenario_scores["SHOPIFY_APP"] += 4
+        # App-block / app-embed elements in DOM = strong app interference signal
+        app_dom_keywords = ['app-block', 'app-embed', 'shopify-app', 'data-app-id', 'data-app-block']
+        app_dom_hits = sum(1 for kw in app_dom_keywords if kw in dom_raw.lower())
+        if app_dom_hits:
+            scenario_scores["SHOPIFY_APP"] += 2 + app_dom_hits  # +3 to +7 depending on matches
+        # App proxy route failures (e.g. /apps/*, /tools/*)
+        app_proxy_failures = [r for r in diagnosis["failed_requests"] if '/apps/' in r["request"].lower() or '/tools/' in r["request"].lower()]
+        if app_proxy_failures:
+            scenario_scores["SHOPIFY_APP"] += 3
+        # Console errors mentioning app names or app-specific patterns
+        app_console_keywords = ['app-block', 'app-embed', 'shopify-section', 'theme-app-extension', 'app proxy']
+        if any(any(kw in e["message"].lower() for kw in app_console_keywords) for e in diagnosis["console_errors"]):
+            scenario_scores["SHOPIFY_APP"] += 3
 
     if diagnosis["forms"]:
         scenario_scores["FORM_SUBMISSION"] += 2
+    # Form-specific console errors (validation, submission failures)
+    form_keywords = ['form', 'submit', 'validation', 'required', 'invalid', 'input', 'field', 'captcha', 'recaptcha']
+    form_console_hits = sum(1 for e in diagnosis["console_errors"] if any(kw in e["message"].lower() for kw in form_keywords))
+    if form_console_hits:
+        scenario_scores["FORM_SUBMISSION"] += min(form_console_hits * 2, 6)
+    # Forms with hidden or broken submit buttons
+    if diagnosis["forms"] and any('submit' in el.get("text", "").lower() or 'form' in el.get("id", "").lower() for el in diagnosis["hidden_elements"]):
+        scenario_scores["FORM_SUBMISSION"] += 3
 
     if len(diagnosis["failed_requests"]) > 2:
         scenario_scores["API_NETWORK_ERROR"] += 3
@@ -581,30 +613,61 @@ def cross_reference_diagnostics():
     if cart_failures:
         scenario_scores["CART_CHECKOUT"] += 4
     cart_keywords_console = ['cart', 'discount', 'variant', 'inventory', 'quantity', 'checkout']
-    if any(any(kw in e["message"].lower() for kw in cart_keywords_console) for e in diagnosis["console_errors"]):
-        scenario_scores["CART_CHECKOUT"] += 2
-    # Shopify cart form present boosts cart scenario slightly
+    cart_console_hits = sum(1 for e in diagnosis["console_errors"] if any(kw in e["message"].lower() for kw in cart_keywords_console))
+    if cart_console_hits:
+        scenario_scores["CART_CHECKOUT"] += min(cart_console_hits * 2, 6)  # stacks up to +6
+    # Shopify cart form/drawer present
     if detected_platform == "shopify" and any(kw in dom_raw.lower() for kw in ['action="/cart/add"', '/cart/update', 'cart-drawer', 'cart-notification']):
-        scenario_scores["CART_CHECKOUT"] += 1
+        scenario_scores["CART_CHECKOUT"] += 2
+    # Cart DOM sabotage signals — disabled submit buttons, sold out states, fake banners
+    cart_dom_signals = 0
+    if any('add to cart' in el.get("text", "").lower() or 'cart' in el.get("id", "").lower() for el in diagnosis["hidden_elements"]):
+        cart_dom_signals += 3
+    # Disabled submit button inside a cart form
+    if 'product-form__submit' in dom_raw.lower() and ('disabled' in dom_raw.lower()):
+        if any(kw in dom_raw.lower() for kw in ['sold out', 'sold-out', 'out of stock', 'out-of-stock', 'unavailable']):
+            cart_dom_signals += 3
+    # Fake stock/inventory banners injected into DOM
+    if any(kw in dom_raw.lower() for kw in ['fake-stock', 'out of stock', 'stock-banner', 'inventory-warning']):
+        cart_dom_signals += 2
+    scenario_scores["CART_CHECKOUT"] += cart_dom_signals
 
     # Performance/render signals
-    perf_keywords = ['layout shift', 'cls', 'cumulative layout', 'render-blocking', 'long task', 'slow', 'paint', 'font']
-    if any(any(kw in e["message"].lower() for kw in perf_keywords) for e in diagnosis["console_errors"]):
-        scenario_scores["PERFORMANCE_RENDER"] += 3
+    perf_keywords = ['layout shift', 'cls', 'cumulative layout', 'render-blocking', 'long task', 'slow', 'paint', 'font', 'fouc', 'foit']
+    perf_console_hits = sum(1 for e in diagnosis["console_errors"] if any(kw in e["message"].lower() for kw in perf_keywords))
+    if perf_console_hits:
+        scenario_scores["PERFORMANCE_RENDER"] += min(perf_console_hits * 2, 8)  # stacks up to +8
     # Many scripts = potential render blocking
     blocking_scripts = [s for s in diagnosis["scripts"] if s["type"] == "external"]
     if len(blocking_scripts) > 15:
-        scenario_scores["PERFORMANCE_RENDER"] += 2
+        scenario_scores["PERFORMANCE_RENDER"] += 3
     elif len(blocking_scripts) > 10:
         scenario_scores["PERFORMANCE_RENDER"] += 1
+    # Late-injected styles in DOM (FOUC signal)
+    if any(kw in dom_raw.lower() for kw in ['late-style', 'injected-style', 'fouc-']):
+        scenario_scores["PERFORMANCE_RENDER"] += 2
 
     if diagnosis["console_errors"]:
         scenario_scores["GENERAL"] += 1
 
     # Detect scenario — pick highest score, fallback to GENERAL
-    detected_scenario = max(scenario_scores, key=scenario_scores.get)
-    if scenario_scores[detected_scenario] == 0:
+    # Tiebreaker: specific issue-type scenarios beat generic platform scenarios
+    tiebreaker_priority = [
+        "CART_CHECKOUT", "PERFORMANCE_RENDER", "API_NETWORK_ERROR",
+        "AUTH_SESSION", "CSS_LAYOUT", "FORM_SUBMISSION", "WIDGET_NOT_SHOWING",
+        "THIRD_PARTY_EMBED", "SHOPIFY_APP", "GENERAL"
+    ]
+    max_score = max(scenario_scores.values())
+    if max_score == 0:
         detected_scenario = "GENERAL"
+    else:
+        # Among all scenarios tied at max_score, pick the one with highest tiebreaker priority
+        tied = [s for s, c in scenario_scores.items() if c == max_score]
+        detected_scenario = min(tied, key=lambda s: tiebreaker_priority.index(s) if s in tiebreaker_priority else 99)
+
+    # Log scenario scores for debugging
+    scores_str = ", ".join(f"{s}={c}" for s, c in sorted(scenario_scores.items(), key=lambda x: x[1], reverse=True) if c > 0)
+    logger.info(f"📊 Scenario scores: {scores_str or 'all zero'} → {detected_scenario}")
 
     # Build ranked list of likely scenarios
     ranked = sorted(scenario_scores.items(), key=lambda x: x[1], reverse=True)

@@ -161,8 +161,9 @@ Elements are misaligned, overlapping, cut off, or visually broken.
 1. `inspect_element` on the broken element — check display, position, overflow, z-index.
 2. Check `hidden_elements` in diagnosis.
 3. `capture_element` for a high-res crop of the problem area.
-4. Look for: overflow:hidden on parent, z-index stacking, flex/grid miscalculation, media query not matching, CSS specificity override.
-5. Common fixes: `inject_css` with `!important` overrides, fix z-index, adjust overflow, correct flex/grid properties.
+4. Look for: overflow:hidden on parent, z-index stacking, flex/grid miscalculation, media query not matching, CSS specificity override, rogue inline styles with `!important`.
+5. **Inline style override technique**: If an element has broken inline styles (especially with `!important`), do NOT try to layer overrides on top. Instead, use `element.removeAttribute('style')` first to wipe the slate clean, THEN apply your corrected styles. This is the fastest and most reliable way to neutralize inline style corruption.
+6. Common fixes: `inject_css` with `!important` overrides, fix z-index, adjust overflow, correct flex/grid properties. For persistent style issues, use a `MutationObserver` watching the `style` attribute to immediately re-apply corrections.
 
 ### PLAYBOOK: AUTH_SESSION
 Login failures, session expiration, redirect loops, or permission errors.
