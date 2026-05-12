@@ -95,8 +95,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
                 chrome.debugger.sendCommand({ tabId: source.tabId }, "Network.getResponseBody", { requestId }, (result) => {
                     if (result && result.body) {
                         const cleanUrl = response.url.split('?')[0].split('/').pop();
-                        const snippet = result.body.substring(0, 2000).replace(/\s+/g, ' ');
-                        diagnostics.network.push(`📦 DATA [${cleanUrl}]: ${snippet}...`);
+                        diagnostics.network.push(`📦 DATA [${cleanUrl}]: ${result.body}`);
                     }
                 });
             } else {
@@ -135,31 +134,80 @@ async function captureObservation(tabId) {
         const results = await chrome.scripting.executeScript({
             target: { tabId },
             func: () => {
-                const simplify = (el) => {
+                const describe = (el) => {
+                    const tag = el.tagName.toLowerCase();
+
+                    // Script tags: capture src attribute (critical for app debugging)
+                    if (tag === 'script') {
+                        const src = el.src || el.getAttribute('src');
+                        if (src) return `📜 [script] src="${src}"`;
+                        // Inline scripts: show first 200 chars to identify them
+                        const inline = (el.textContent || '').trim().substring(0, 200);
+                        if (inline) return `📜 [script:inline] "${inline}..."`;
+                        return null;
+                    }
+                    // Link/style tags: capture href (CSS debugging)
+                    if (tag === 'link') {
+                        const href = el.href || el.getAttribute('href');
+                        const rel = el.rel || '';
+                        if (href) return `🎨 [link rel="${rel}"] href="${href}"`;
+                        return null;
+                    }
+                    // Style tags: note their presence and size
+                    if (tag === 'style') {
+                        const len = (el.textContent || '').length;
+                        const id = el.id ? `#${el.id}` : '';
+                        return `🎨 [style${id}] (${len} chars)`;
+                    }
+
+                    // Skip pure noise
+                    if (['meta', 'noscript', 'br', 'hr'].includes(tag)) return null;
+
+                    const id = el.id ? `#${el.id}` : '';
+                    const cls = el.className && typeof el.className === 'string' ? `.${el.className.split(' ').join('.')}` : '';
+                    const type = el.type ? `[type="${el.type}"]` : '';
+
                     const interactive = ["BUTTON", "A", "INPUT", "SELECT", "TEXTAREA"];
                     const hasClick = el.onclick || el.getAttribute('role') === 'button' || window.getComputedStyle(el).cursor === 'pointer';
-                    
-                    if (interactive.includes(el.tagName) || hasClick) {
-                        const id = el.id ? `#${el.id}` : '';
-                        const cls = el.className && typeof el.className === 'string' ? `.${el.className.split(' ').join('.')}` : '';
-                        const text = (el.innerText || el.value || el.title || '').trim().substring(0, 2000); // Increased limit
-                        const type = el.type ? `[type="${el.type}"]` : '';
-                        return `[${el.tagName.toLowerCase()}${id}${cls}${type} "${text}"]`;
-                    }
-                    return null;
+                    const isInteractive = interactive.includes(el.tagName) || hasClick;
+
+                    // Full text for all elements — no truncation
+                    const text = (el.innerText || el.value || el.title || '').trim();
+                    // Only include direct text (not children's text) for non-interactive containers
+                    const directText = isInteractive ? text : Array.from(el.childNodes)
+                        .filter(n => n.nodeType === 3)
+                        .map(n => n.textContent.trim())
+                        .filter(t => t.length > 0)
+                        .join(' ');
+
+                    // Check computed visibility for potential hidden-element detection
+                    let visFlag = '';
+                    try {
+                        const cs = window.getComputedStyle(el);
+                        if (cs.display === 'none') visFlag = ' [HIDDEN:display]';
+                        else if (cs.visibility === 'hidden') visFlag = ' [HIDDEN:visibility]';
+                        else if (cs.opacity === '0') visFlag = ' [HIDDEN:opacity]';
+                        else if (el.offsetWidth === 0 && el.offsetHeight === 0 && !isInteractive) visFlag = ' [HIDDEN:zero-size]';
+                    } catch(e) {}
+
+                    if (!directText && !isInteractive && !id && !visFlag) return null;
+
+                    const marker = isInteractive ? '★' : '·';
+                    return `${marker} [${tag}${id}${cls}${type}]${visFlag} "${directText}"`;
                 };
 
                 return {
-                    dom: Array.from(document.querySelectorAll('*')).map(simplify).filter(x => x !== null).join('\n'),
+                    dom: Array.from(document.querySelectorAll('*')).map(describe).filter(x => x !== null).join('\n'),
                     url: window.location.href
                 };
             }
         });
 
         const pageData = results[0].result;
-        
-        const recentLogs = diagnostics.logs.slice(-1000).join('\n') || "No console logs.";
-        const recentNetwork = diagnostics.network.slice(-1000).join('\n') || "No network issues.";
+
+        // Send ALL logs and network data — no truncation, server handles file writing
+        const allLogs = diagnostics.logs.join('\n') || "No console logs.";
+        const allNetwork = diagnostics.network.join('\n') || "No network issues.";
 
         let screenshot = null;
         try {
@@ -173,8 +221,8 @@ async function captureObservation(tabId) {
         return {
             dom: pageData.dom,
             url: pageData.url,
-            console: recentLogs,
-            network: recentNetwork,
+            console: allLogs,
+            network: allNetwork,
             screenshot: screenshot,
             element_view: elementCapture
         };
@@ -379,28 +427,6 @@ async function performAction(tabId, actionData) {
                 });
             });
             diagnostics.logs.push(`>>> TEST_RESULT: ${JSON.stringify(result)}`);
-        } else if (action === "get_network_body") {
-            const requestId = networkRequests[payload.url];
-            if (requestId) {
-                const body = await new Promise((resolve) => {
-                    chrome.debugger.sendCommand({ tabId }, "Network.getResponseBody", { requestId }, (res) => {
-                        if (chrome.runtime.lastError) resolve(`Error: ${chrome.runtime.lastError.message}`);
-                        else resolve(res.body);
-                    });
-                });
-                diagnostics.logs.push(`>>> NETWORK_BODY [${payload.url}]: ${body.substring(0, 5000)}`);
-            } else {
-                diagnostics.logs.push(`>>> NETWORK_BODY [${payload.url}]: NOT_FOUND`);
-            }
-        } else if (action === "clear_site_data") {
-            const tab = await chrome.tabs.get(tabId);
-            await new Promise((resolve) => {
-                chrome.debugger.sendCommand({ tabId }, "Storage.clearDataForOrigin", {
-                    origin: new URL(payload.url || tab.url).origin,
-                    storageTypes: "cookies,local_storage,indexeddb,cache_storage"
-                }, () => resolve());
-            });
-            diagnostics.logs.push(`>>> SITE DATA CLEARED for ${payload.url || tab.url}`);
         } else if (action === "answer_user") {
             // V1 Compatibility
             if (sidepanelPort) sidepanelPort.postMessage({ type: "agent_message", text: payload.message });

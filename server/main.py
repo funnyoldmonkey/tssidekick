@@ -4,6 +4,7 @@ import re
 import os
 import base64
 import time
+import hashlib
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from gemma import gemma_client
 import logging
@@ -30,26 +31,565 @@ sessions = {}
 SESSIONS_DIR = "sessions"
 BRAIN_INPUT = "brain_input.json"
 BRAIN_OUTPUT = "brain_output.json"
+SCRATCH_DIR = os.path.join(os.path.dirname(__file__), "..", "scratch")
+SCRATCH_NET_BODIES = os.path.join(SCRATCH_DIR, "obs_net_bodies")
 
-if not os.path.exists(SESSIONS_DIR):
-    os.makedirs(SESSIONS_DIR)
+# Local search actions that don't need the extension
+LOCAL_ACTIONS = {"search_dom", "search_console", "search_network", "read_network_body", "refresh_files", "diagnose"}
 
-SYSTEM_PROMPT = """You are TS Sidekick V2, an elite autonomous troubleshooting agent.
-You operate in a continuous loop. Your goal is to identify, fix, and VERIFY issues.
+# Max history turns to keep (prevents free-tier context overflow)
+MAX_HISTORY_TURNS = 20
 
-RULES:
-1. **Autonomous Verification**: Before giving a final answer to the user, you MUST verify your fix. Perform an 'observe' or 'run_test' after your action to confirm the state has changed as expected.
-2. **Visual Audit**: Always use the screenshot to confirm your actions (look for green/orange outlines).
-3. **Continuous Conversation**: Use 'post_message' to communicate with the user. The loop will not stop; it will wait for the user's response or your next action.
-4. **No Truncation**: If you suspect data is missing, use 'get_detailed_dom' or 'get_full_logs'.
+for d in [SESSIONS_DIR, SCRATCH_DIR, SCRATCH_NET_BODIES]:
+    os.makedirs(d, exist_ok=True)
 
-Output format:
+SYSTEM_PROMPT = """You are TS Sidekick V2, an elite autonomous Tier 2 support agent.
+You operate in a continuous loop. Your goal is to diagnose issues, fix them, VERIFY the fix, and only THEN report to the user.
+
+## GOLDEN RULE: SILENT UNTIL SOLVED
+Do NOT use post_message until you have either:
+- A verified working fix (confirmed via screenshot + DOM check), OR
+- Exhausted 3+ fix attempts and need user input.
+Work silently. The user doesn't need play-by-play updates.
+
+## UNIVERSAL DIAGNOSTIC FRAMEWORK
+Every investigation follows these steps regardless of scenario:
+1. **`diagnose`** — Always start here. The server cross-references scripts, DOM, console, network and auto-detects the scenario type.
+2. **Read the diagnosis packet** — Check `detected_scenario` to know which playbook to follow. Review `potential_issues` for auto-flagged problems.
+3. **Deep investigation** — Use search tools (`search_dom`, `search_console`, `search_network`, `read_network_body`) to drill into specific evidence. These are instant and don't cost extension roundtrips.
+4. **Hypothesize** — State your root cause theory in your `thought`.
+5. **Fix** — Apply via `inject_js`, `inject_css`, `click`, `type`, etc.
+6. **Verify** — Check screenshot + DOM/console after re-observation. If not fixed, try a different approach.
+7. **Report** — Only after verified fix or 3+ failed attempts.
+
+## FIX-AND-VERIFY LOOP
+1. Inject fix via `inject_js` or `inject_css`.
+2. After re-observation: check screenshot, `search_dom`, `inspect_element`.
+3. If NOT fixed: review `previous_fix_attempts`, try a DIFFERENT approach.
+4. Escalation order: CSS fix → JS re-init → DOM reconstruction → user notification.
+5. After 3 failed attempts, `post_message` with: root cause, what you tried, what the user needs to do.
+
+## SCENARIO PLAYBOOKS
+The `diagnose` action auto-detects the scenario. Follow the matching playbook:
+
+### PLAYBOOK: WIDGET_NOT_SHOWING
+An injected widget, button, or UI element is not rendering.
+1. Find the app's script in the diagnosis (check `scripts` + `network_status`).
+2. `read_network_body` to see what selectors/elements the script creates.
+3. `search_dom` for the target container the script expects.
+4. Check `hidden_elements` — the widget may exist but be hidden by CSS.
+5. `search_console` for errors from the script's domain.
+6. Common fixes: CSS `display` override, re-initialize widget JS, create missing container.
+
+### PLAYBOOK: SHOPIFY_APP
+A Shopify app's functionality is broken or not rendering.
+- Shopify themes use Liquid templates (server-side). App blocks must be added via Theme Customizer → App embeds.
+- Apps inject via ScriptTag API (`<head>`) or App Blocks (theme sections).
+- Script CDN patterns: `cdn.shopify.com/extensions/`, app-specific domains.
+- Theme CSS specificity often overrides app CSS — check for `!important` conflicts.
+- Shopify CSP headers exist — `inject_js` via debugger bypasses them.
+- Key selectors: `form[action*="/cart/add"]`, `product-form`, `.product-form__submit`, `button[name="add"]`, `[data-add-to-cart]`.
+- If app block container missing → user must add via Theme Customizer (can't fix with JS).
+
+### PLAYBOOK: FORM_SUBMISSION
+A form is not submitting, validating incorrectly, or losing data.
+1. `search_dom("form")` to find all forms and their `action`/`method` attributes.
+2. `search_dom("input")` to check for required fields, hidden inputs, CSRF tokens.
+3. `search_console("submit")` or `search_console("validation")` for JS errors on submit.
+4. `search_network("/api")` or the form's action URL to see if the request was made.
+5. Check for: missing CSRF token, disabled submit button, `preventDefault` in JS, form action mismatch.
+6. Common fixes: remove disabled attribute, dispatch submit event, fill hidden fields, fix validation JS.
+
+### PLAYBOOK: API_NETWORK_ERROR
+An API call is failing, returning wrong data, or not being made.
+1. Check `failed_requests` in diagnosis for 4xx/5xx responses.
+2. `search_network` for the specific API endpoint.
+3. `read_network_body` to see the actual response (error messages, malformed data).
+4. `search_console` for fetch/XHR errors, CORS errors, timeout messages.
+5. Check for: wrong endpoint URL, missing auth headers, CORS policy, rate limiting, malformed request body.
+6. Common fixes: retry with correct params via `inject_js`, fix request headers, handle CORS preflight.
+
+### PLAYBOOK: CSS_LAYOUT
+Elements are misaligned, overlapping, cut off, or visually broken.
+1. `inspect_element` on the broken element — check computed styles (display, position, overflow, z-index).
+2. `search_dom("[HIDDEN:")` for elements hidden by CSS.
+3. `capture_element` for a high-res crop of the problem area.
+4. Look for: overflow:hidden on parent, z-index stacking, flexbox/grid miscalculation, media query not matching, CSS specificity override.
+5. Common fixes: `inject_css` with targeted overrides using `!important`, fix z-index stacking, adjust overflow.
+
+### PLAYBOOK: AUTH_SESSION
+Login failures, session expiration, redirect loops, or permission errors.
+1. `search_network("login")` or `search_network("auth")` for auth-related requests.
+2. `search_network("401")` or `search_network("403")` for permission failures.
+3. `search_console("token")` or `search_console("session")` for auth errors.
+4. Check cookies via `search_network("cookie")`.
+5. Look for: expired token, missing cookie, CSRF mismatch, OAuth redirect loop, SSO configuration error.
+6. Common fixes: `clear_site_data` and retry, inject fresh token via JS, fix redirect URL.
+
+### PLAYBOOK: THIRD_PARTY_EMBED
+A third-party integration (chat widget, analytics, payment form, social embed) is broken.
+1. Find the third-party script in diagnosis `scripts` list.
+2. Check its `network_status` — did it load?
+3. `search_console` for the third-party's domain to find errors.
+4. Check for: CSP blocking, ad blocker interference, script load order, missing container div, iframe sandbox restrictions.
+5. Common fixes: inject the script again via `inject_js`, create missing container, adjust CSP via meta tag.
+
+### PLAYBOOK: GENERAL
+No specific scenario detected — use general debugging approach.
+1. Review ALL sections of the diagnosis packet.
+2. Prioritize: console errors first, then network failures, then hidden elements.
+3. `search_console("error")` for any JS exceptions.
+4. `search_network("FAILED")` for broken requests.
+5. Cross-reference errors with scripts to identify the culprit.
+6. Apply targeted fix, verify, iterate.
+
+## OUTPUT FORMAT
 {
-  "thought": "Deep reasoning including verification plan.",
-  "action": "click" | "type" | "inject_js" | "navigate" | "scroll" | "hover" | "post_message" | "observe" | "run_test" | "inspect_element" | "get_network_body" | "clear_site_data" | "capture_element",
+  "thought": "Detailed reasoning. Include: scenario detected, evidence found, hypothesis, fix plan, verification method.",
+  "action": "click" | "type" | "inject_js" | "inject_css" | "navigate" | "scroll" | "hover" | "post_message" | "observe" | "run_test" | "inspect_element" | "get_network_body" | "clear_site_data" | "capture_element" | "search_dom" | "search_console" | "search_network" | "read_network_body" | "refresh_files" | "diagnose",
   "payload": { ... }
 }
 """
+
+
+# ── Scratch File Helpers ─────────────────────────────────────────────────────
+
+def write_scratch_files(obs):
+    """Write full observation data to scratch files. No truncation."""
+    try:
+        # DOM
+        dom_path = os.path.join(SCRATCH_DIR, "obs_dom.txt")
+        with open(dom_path, "w", encoding="utf-8") as f:
+            f.write(obs.get("dom", ""))
+
+        # Console logs
+        console_path = os.path.join(SCRATCH_DIR, "obs_console.log")
+        with open(console_path, "w", encoding="utf-8") as f:
+            f.write(obs.get("console", ""))
+
+        # Network log
+        network_path = os.path.join(SCRATCH_DIR, "obs_network.log")
+        with open(network_path, "w", encoding="utf-8") as f:
+            f.write(obs.get("network", ""))
+
+        # Extract and save individual network bodies to separate files
+        network_raw = obs.get("network", "")
+        for line in network_raw.split('\n'):
+            if line.startswith('📦 DATA ['):
+                try:
+                    # Format: 📦 DATA [cleanUrl]: body
+                    bracket_end = line.index(']')
+                    url_key = line[len('📦 DATA ['):bracket_end]
+                    body = line[bracket_end + 2:]  # skip ]:
+                    url_hash = hashlib.md5(url_key.encode()).hexdigest()[:12]
+                    body_path = os.path.join(SCRATCH_NET_BODIES, f"{url_key}_{url_hash}.txt")
+                    # Sanitize filename
+                    safe_name = re.sub(r'[<>:"/\\|?*]', '_', url_key)
+                    body_path = os.path.join(SCRATCH_NET_BODIES, f"{safe_name}_{url_hash}.txt")
+                    with open(body_path, "w", encoding="utf-8") as f:
+                        f.write(body)
+                except Exception:
+                    pass
+
+        logger.info(f"Scratch files written to {SCRATCH_DIR}")
+    except Exception as e:
+        logger.error(f"Failed to write scratch files: {e}")
+
+
+def build_slim_observation(obs):
+    """Build a context-friendly slim observation for brain_input.json."""
+    dom_raw = obs.get("dom", "")
+    console_raw = obs.get("console", "")
+    network_raw = obs.get("network", "")
+
+    # DOM summary: counts + first/last few interactive elements
+    dom_lines = dom_raw.split('\n') if dom_raw else []
+    interactive_lines = [l for l in dom_lines if l.startswith('★')]
+    all_lines = [l for l in dom_lines if l.startswith('·') or l.startswith('★')]
+
+    dom_summary = {
+        "total_elements": len(all_lines),
+        "interactive_elements": len(interactive_lines),
+        "hint": "Use search_dom(query) to find specific elements in scratch/obs_dom.txt",
+        "preview": interactive_lines[:30]  # First 30 interactive elements as preview
+    }
+
+    # Console summary: last 20 lines + error count
+    console_lines = console_raw.split('\n') if console_raw else []
+    error_count = sum(1 for l in console_lines if '[error]' in l.lower() or '🚨' in l)
+
+    console_summary = {
+        "total_lines": len(console_lines),
+        "error_count": error_count,
+        "hint": "Use search_console(query) to find specific logs in scratch/obs_console.log",
+        "recent": console_lines[-20:] if console_lines else []
+    }
+
+    # Network summary: last 20 entries + failure count
+    network_lines = network_raw.split('\n') if network_raw else []
+    fail_count = sum(1 for l in network_lines if '🚨 FAILED' in l)
+
+    network_summary = {
+        "total_requests": len(network_lines),
+        "failed_requests": fail_count,
+        "hint": "Use search_network(query) to find specific requests in scratch/obs_network.log. Use read_network_body(filename) to read full response bodies from scratch/obs_net_bodies/",
+        "recent": network_lines[-20:] if network_lines else []
+    }
+
+    return {
+        "dom": dom_summary,
+        "console": console_summary,
+        "network": network_summary,
+        "url": obs.get("url", "")
+    }
+
+
+def handle_local_search(action_name, payload):
+    """Handle search actions locally without roundtripping to the extension."""
+    query = payload.get("query", "")
+
+    if action_name == "search_dom":
+        return _grep_file(os.path.join(SCRATCH_DIR, "obs_dom.txt"), query)
+
+    elif action_name == "search_console":
+        return _grep_file(os.path.join(SCRATCH_DIR, "obs_console.log"), query)
+
+    elif action_name == "search_network":
+        return _grep_file(os.path.join(SCRATCH_DIR, "obs_network.log"), query)
+
+    elif action_name == "read_network_body":
+        filename = payload.get("filename", "")
+        # Search for a matching file in obs_net_bodies
+        if filename:
+            for f in os.listdir(SCRATCH_NET_BODIES):
+                if filename.lower() in f.lower():
+                    filepath = os.path.join(SCRATCH_NET_BODIES, f)
+                    with open(filepath, "r", encoding="utf-8") as fh:
+                        return {"file": f, "body": fh.read()}
+        # If no filename, list available bodies
+        available = os.listdir(SCRATCH_NET_BODIES) if os.path.exists(SCRATCH_NET_BODIES) else []
+        return {"available_files": available, "hint": "Provide a filename or partial match in payload.filename"}
+
+    elif action_name == "diagnose":
+        return cross_reference_diagnostics()
+
+    return {"error": f"Unknown local action: {action_name}"}
+
+
+def _grep_file(filepath, query):
+    """Search a file for lines matching a query (case-insensitive)."""
+    if not os.path.exists(filepath):
+        return {"error": f"File not found: {filepath}", "matches": []}
+
+    matches = []
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f, 1):
+                if query.lower() in line.lower():
+                    matches.append({"line": i, "content": line.rstrip()})
+    except Exception as e:
+        return {"error": str(e), "matches": []}
+
+    return {
+        "query": query,
+        "file": os.path.basename(filepath),
+        "total_matches": len(matches),
+        "matches": matches[:100],  # Cap results at 100 to keep brain_input reasonable
+        "truncated": len(matches) > 100
+    }
+
+
+# ── Cross-Reference Diagnostic Engine ────────────────────────────────────────
+
+def cross_reference_diagnostics():
+    """Pre-correlate scripts, DOM targets, console errors, and hidden elements
+    into a structured diagnosis packet. Auto-detects scenario type.
+    Runs entirely server-side."""
+
+    diagnosis = {
+        "scripts": [],
+        "hidden_elements": [],
+        "console_errors": [],
+        "failed_requests": [],
+        "potential_issues": [],
+        "forms": [],
+        "auth_signals": [],
+        "third_party_embeds": []
+    }
+
+    dom_path = os.path.join(SCRATCH_DIR, "obs_dom.txt")
+    console_path = os.path.join(SCRATCH_DIR, "obs_console.log")
+    network_path = os.path.join(SCRATCH_DIR, "obs_network.log")
+
+    dom_raw = ""
+    dom_lines = []
+    console_raw = ""
+    network_raw = ""
+
+    # ── 1. Load all scratch files ────────────────────────────────────────
+    if os.path.exists(dom_path):
+        with open(dom_path, "r", encoding="utf-8") as f:
+            dom_raw = f.read()
+            dom_lines = dom_raw.split('\n')
+
+    if os.path.exists(console_path):
+        with open(console_path, "r", encoding="utf-8") as f:
+            console_raw = f.read()
+
+    if os.path.exists(network_path):
+        with open(network_path, "r", encoding="utf-8") as f:
+            network_raw = f.read()
+
+    # ── 2. Analyze scripts from DOM ──────────────────────────────────────
+    for i, line in enumerate(dom_lines, 1):
+        line = line.rstrip()
+        if line.startswith('📜 [script] src="'):
+            src = line.split('src="')[1].rstrip('"')
+            diagnosis["scripts"].append({"line": i, "src": src, "type": "external"})
+        elif line.startswith('📜 [script:inline]'):
+            snippet = line.split('"')[1] if '"' in line else ""
+            diagnosis["scripts"].append({"line": i, "snippet": snippet[:150], "type": "inline"})
+
+        # Hidden elements
+        if '[HIDDEN:' in line:
+            diagnosis["hidden_elements"].append({"line": i, "element": line})
+
+    # ── 3. Analyze forms ─────────────────────────────────────────────────
+    for i, line in enumerate(dom_lines, 1):
+        line_lower = line.lower()
+        if '★ [form' in line_lower or '· [form' in line_lower:
+            diagnosis["forms"].append({"line": i, "element": line.rstrip()})
+        # Collect input/select/textarea inside forms for context
+        if any(tag in line_lower for tag in ['★ [input', '★ [select', '★ [textarea', '★ [button']):
+            if 'disabled' in line_lower or '[HIDDEN:' in line:
+                diagnosis["potential_issues"].append(f"Interactive element may be disabled or hidden (line {i}): {line.rstrip()[:120]}")
+
+    # ── 4. Analyze console errors ────────────────────────────────────────
+    error_keywords = ['[error]', 'uncaught', 'failed', 'refused', 'blocked',
+                      'exception', 'typeerror', 'referenceerror', 'syntaxerror',
+                      'cors', 'csp', 'content security policy', '403', '401', '404']
+    for i, line in enumerate(console_raw.split('\n'), 1):
+        line = line.rstrip()
+        if any(kw in line.lower() for kw in error_keywords):
+            diagnosis["console_errors"].append({"line": i, "message": line})
+
+    # ── 5. Analyze network failures ──────────────────────────────────────
+    for i, line in enumerate(network_raw.split('\n'), 1):
+        line = line.rstrip()
+        if '🚨 FAILED' in line:
+            diagnosis["failed_requests"].append({"line": i, "request": line})
+
+    # ── 6. Cross-reference: script src vs network status ─────────────────
+    from urllib.parse import urlparse
+
+    for script in diagnosis["scripts"]:
+        if script["type"] == "external":
+            src = script["src"]
+            src_short = src.split('?')[0].split('/')[-1]
+            if any(src_short in req["request"] for req in diagnosis["failed_requests"]):
+                script["network_status"] = "FAILED"
+                diagnosis["potential_issues"].append(f"Script '{src_short}' is in the DOM but its network request FAILED")
+            elif src_short in network_raw:
+                script["network_status"] = "LOADED"
+            else:
+                script["network_status"] = "NOT_SEEN_IN_NETWORK"
+
+    # ── 7. Cross-reference: scripts vs console errors ────────────────────
+    for script in diagnosis["scripts"]:
+        if script["type"] == "external":
+            try:
+                src_domain = urlparse(script["src"]).netloc
+            except Exception:
+                src_domain = ""
+            if src_domain:
+                related_errors = [e for e in diagnosis["console_errors"] if src_domain in e["message"]]
+                if related_errors:
+                    script["related_errors"] = related_errors[:5]
+                    diagnosis["potential_issues"].append(f"Script from '{src_domain}' has {len(related_errors)} console error(s)")
+
+    # ── 8. Detect auth/session signals ───────────────────────────────────
+    auth_keywords_console = ['token', 'session', 'unauthorized', '401', '403', 'login', 'oauth', 'csrf', 'forbidden']
+    auth_keywords_network = ['401', '403', 'login', 'auth', 'oauth', 'token', 'session', 'signin']
+
+    for err in diagnosis["console_errors"]:
+        if any(kw in err["message"].lower() for kw in auth_keywords_console):
+            diagnosis["auth_signals"].append({"source": "console", "detail": err})
+
+    for req in diagnosis["failed_requests"]:
+        if any(kw in req["request"].lower() for kw in auth_keywords_network):
+            diagnosis["auth_signals"].append({"source": "network", "detail": req})
+
+    # ── 9. Detect third-party embeds ─────────────────────────────────────
+    known_third_party = ['intercom', 'drift', 'zendesk', 'tawk', 'crisp', 'hotjar',
+                         'google-analytics', 'gtag', 'gtm', 'facebook', 'fb-', 'twitter',
+                         'stripe', 'paypal', 'braintree', 'recaptcha', 'hcaptcha',
+                         'youtube', 'vimeo', 'instagram', 'tiktok', 'pinterest',
+                         'klaviyo', 'mailchimp', 'hubspot', 'segment', 'mixpanel']
+
+    for script in diagnosis["scripts"]:
+        if script["type"] == "external":
+            src_lower = script["src"].lower()
+            for tp in known_third_party:
+                if tp in src_lower:
+                    embed_info = {"service": tp, "src": script["src"], "network_status": script.get("network_status", "UNKNOWN")}
+                    if script.get("related_errors"):
+                        embed_info["has_errors"] = True
+                    diagnosis["third_party_embeds"].append(embed_info)
+                    break
+
+    # ── 10. Platform detection ───────────────────────────────────────────
+    platform_markers = {
+        "shopify": any(kw in dom_raw.lower() for kw in ['shopify', 'myshopify', '/cart/add', 'product-form']),
+        "wordpress": any(kw in dom_raw.lower() for kw in ['wp-content', 'wp-includes', 'wordpress']),
+        "wix": 'wix' in dom_raw.lower() or 'parastorage' in dom_raw.lower(),
+        "squarespace": 'squarespace' in dom_raw.lower(),
+        "webflow": 'webflow' in dom_raw.lower(),
+        "magento": any(kw in dom_raw.lower() for kw in ['magento', 'mage-init']),
+        "bigcommerce": 'bigcommerce' in dom_raw.lower()
+    }
+    detected_platform = next((p for p, v in platform_markers.items() if v), "unknown")
+    diagnosis["platform"] = detected_platform
+
+    # Shopify-specific context
+    if detected_platform == "shopify":
+        diagnosis["shopify_context"] = {
+            "app_blocks": 'data-app-block' in dom_raw or 'shopify-block' in dom_raw,
+            "product_form": 'action="/cart/add"' in dom_raw or 'product-form' in dom_raw,
+            "cart_form": '/cart' in dom_raw,
+            "bis_container": any(kw in dom_raw for kw in ['bis-container', 'bis_', 'BIS_']),
+            "add_to_cart_button": any(kw in dom_raw for kw in ['add-to-cart', 'AddToCart', 'product-form__submit'])
+        }
+
+    # ── 11. Auto-detect scenario type ────────────────────────────────────
+    scenario_scores = {
+        "WIDGET_NOT_SHOWING": 0,
+        "SHOPIFY_APP": 0,
+        "FORM_SUBMISSION": 0,
+        "API_NETWORK_ERROR": 0,
+        "CSS_LAYOUT": 0,
+        "AUTH_SESSION": 0,
+        "THIRD_PARTY_EMBED": 0,
+        "GENERAL": 0
+    }
+
+    # Score based on signals
+    if diagnosis["hidden_elements"]:
+        scenario_scores["WIDGET_NOT_SHOWING"] += 3
+        scenario_scores["CSS_LAYOUT"] += 2
+
+    if any(s.get("network_status") == "FAILED" for s in diagnosis["scripts"]):
+        scenario_scores["WIDGET_NOT_SHOWING"] += 3
+
+    if detected_platform == "shopify":
+        scenario_scores["SHOPIFY_APP"] += 4
+
+    if diagnosis["forms"]:
+        scenario_scores["FORM_SUBMISSION"] += 2
+
+    if len(diagnosis["failed_requests"]) > 2:
+        scenario_scores["API_NETWORK_ERROR"] += 3
+
+    if any('cors' in e["message"].lower() for e in diagnosis["console_errors"]):
+        scenario_scores["API_NETWORK_ERROR"] += 2
+
+    if diagnosis["auth_signals"]:
+        scenario_scores["AUTH_SESSION"] += len(diagnosis["auth_signals"])
+
+    if diagnosis["third_party_embeds"]:
+        scenario_scores["THIRD_PARTY_EMBED"] += 2
+        broken_embeds = [e for e in diagnosis["third_party_embeds"] if e.get("has_errors") or e.get("network_status") == "FAILED"]
+        if broken_embeds:
+            scenario_scores["THIRD_PARTY_EMBED"] += 3
+
+    if diagnosis["console_errors"]:
+        scenario_scores["GENERAL"] += 1
+
+    # Detect scenario — pick highest score, fallback to GENERAL
+    detected_scenario = max(scenario_scores, key=scenario_scores.get)
+    if scenario_scores[detected_scenario] == 0:
+        detected_scenario = "GENERAL"
+
+    # Build ranked list of likely scenarios
+    ranked = sorted(scenario_scores.items(), key=lambda x: x[1], reverse=True)
+    ranked = [{"scenario": s, "confidence": c} for s, c in ranked if c > 0]
+
+    diagnosis["detected_scenario"] = detected_scenario
+    diagnosis["scenario_ranking"] = ranked[:3]
+
+    # ── 12. Hidden elements summary ──────────────────────────────────────
+    if diagnosis["hidden_elements"]:
+        diagnosis["potential_issues"].append(f"Found {len(diagnosis['hidden_elements'])} hidden elements — check if any are the target widget/component")
+
+    # ── 13. Available network bodies ─────────────────────────────────────
+    if os.path.exists(SCRATCH_NET_BODIES):
+        diagnosis["available_network_bodies"] = os.listdir(SCRATCH_NET_BODIES)
+    else:
+        diagnosis["available_network_bodies"] = []
+
+    # ── Summary ──────────────────────────────────────────────────────────
+    diagnosis["summary"] = {
+        "detected_scenario": detected_scenario,
+        "platform": detected_platform,
+        "total_scripts": len(diagnosis["scripts"]),
+        "external_scripts": sum(1 for s in diagnosis["scripts"] if s["type"] == "external"),
+        "hidden_elements_count": len(diagnosis["hidden_elements"]),
+        "console_errors_count": len(diagnosis["console_errors"]),
+        "failed_network_requests": len(diagnosis["failed_requests"]),
+        "forms_count": len(diagnosis["forms"]),
+        "auth_signals_count": len(diagnosis["auth_signals"]),
+        "third_party_embeds_count": len(diagnosis["third_party_embeds"]),
+        "issues_found": len(diagnosis["potential_issues"]),
+        "recommended_playbook": detected_scenario
+    }
+
+    return diagnosis
+
+
+# ── Fix Attempt Tracking ─────────────────────────────────────────────────────
+
+def record_fix_attempt(session, action_data):
+    """Track what fixes were attempted so the brain doesn't repeat itself."""
+    if "fix_attempts" not in session:
+        session["fix_attempts"] = []
+
+    attempt = {
+        "attempt_number": len(session["fix_attempts"]) + 1,
+        "action": action_data.get("action"),
+        "thought": action_data.get("thought", "")[:300],
+        "timestamp": int(time.time())
+    }
+
+    payload = action_data.get("payload", {})
+    if action_data.get("action") == "inject_js":
+        attempt["code_preview"] = payload.get("code", "")[:200]
+    elif action_data.get("action") == "inject_css":
+        attempt["css_preview"] = payload.get("css", "")[:200]
+
+    session["fix_attempts"].append(attempt)
+    return attempt
+
+
+def get_fix_summary(session):
+    """Build a summary of past fix attempts for the brain to review."""
+    attempts = session.get("fix_attempts", [])
+    if not attempts:
+        return None
+    return {
+        "total_attempts": len(attempts),
+        "attempts": attempts,
+        "hint": "Do NOT repeat a previously attempted fix. Try a different approach."
+    }
+
+
+# ── History Trimming ─────────────────────────────────────────────────────────
+
+def trim_history(session):
+    """Keep only the last MAX_HISTORY_TURNS exchanges to prevent context overflow."""
+    history = session.get("history", [])
+    if len(history) > MAX_HISTORY_TURNS * 2:  # Each turn = user + model
+        session["history"] = history[-(MAX_HISTORY_TURNS * 2):]
+        logger.info(f"History trimmed to {len(session['history'])} entries")
+
 
 async def keepalive(websocket: WebSocket, interval: int = 30):
     """Send a ping every `interval` seconds to keep the WebSocket alive.
@@ -135,20 +675,37 @@ async def websocket_endpoint(websocket: WebSocket):
                         except Exception as e:
                             logger.error(f"Failed to save screenshot: {e}")
 
+                    # Write full data to scratch files (no truncation)
+                    write_scratch_files(obs)
+
+                    # Build slim observation for brain_input.json (context-friendly)
+                    slim_obs = build_slim_observation(obs)
+
+                    # Trim history to prevent context overflow on free tier
+                    trim_history(session)
+
                     # Ensure no stale output exists
                     if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
-                    
+
+                    # Build brain input with fix attempt history
+                    brain_payload = {
+                        "tab_id": tab_id,
+                        "query": user_query,
+                        "observation": slim_obs,
+                        "screenshot_path": screenshot_rel_path,
+                        "history": session["history"]
+                    }
+
+                    # Include fix attempt summary if any attempts have been made
+                    fix_summary = get_fix_summary(session)
+                    if fix_summary:
+                        brain_payload["previous_fix_attempts"] = fix_summary
+
                     temp_input = f"{BRAIN_INPUT}.tmp"
                     with open(temp_input, "w", encoding="utf-8") as f:
-                        json.dump({
-                            "tab_id": tab_id,
-                            "query": user_query,
-                            "observation": obs,
-                            "screenshot_path": screenshot_rel_path,
-                            "history": session["history"]
-                        }, f, indent=2)
+                        json.dump(brain_payload, f, indent=2)
                     os.replace(temp_input, BRAIN_INPUT)
-                    logger.info(f"Observation written to {BRAIN_INPUT}")
+                    logger.info(f"Slim observation written to {BRAIN_INPUT}, full data in scratch/")
 
                     logger.info("Waiting for Antigravity Brain response (brain_output.json)...")
                     
@@ -224,12 +781,119 @@ async def websocket_endpoint(websocket: WebSocket):
                         logger.info("Terminate action received. Closing connection.")
                         await websocket.close()
                         break
-                    logger.info(f"Sending action to Extension: {action_name}")
-                    await websocket.send_text(json.dumps({
-                        "type": "action",
-                        "tabId": tab_id,
-                        "data": action_data
-                    }))
+
+                    # ── LOCAL ACTION ROUTING ──────────────────────────────
+                    # Search/read actions are handled server-side without
+                    # roundtripping to the extension. Results go straight
+                    # back into brain_input.json for the next Brain turn.
+                    if action_name in LOCAL_ACTIONS:
+                        if action_name == "refresh_files":
+                            # This one DOES need the extension — request a fresh observe
+                            logger.info("refresh_files requested, triggering re-observe...")
+                            await websocket.send_text(json.dumps({
+                                "type": "command",
+                                "action": "observe",
+                                "tabId": tab_id
+                            }))
+                        else:
+                            logger.info(f"Handling local action: {action_name}")
+                            search_results = handle_local_search(action_name, action_data.get("payload", {}))
+
+                            # Write results directly to brain_input.json — no extension involved
+                            if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
+                            temp_input = f"{BRAIN_INPUT}.tmp"
+                            with open(temp_input, "w", encoding="utf-8") as f:
+                                json.dump({
+                                    "tab_id": tab_id,
+                                    "query": session.get("user_query"),
+                                    "search_results": search_results,
+                                    "action_performed": action_name,
+                                    "screenshot_path": screenshot_rel_path,
+                                    "history": session["history"]
+                                }, f, indent=2)
+                            os.replace(temp_input, BRAIN_INPUT)
+                            logger.info(f"Search results written to {BRAIN_INPUT}, waiting for next Brain action...")
+
+                            # Now wait for the Brain's next response (same polling loop)
+                            while not os.path.exists(BRAIN_OUTPUT):
+                                await asyncio.sleep(0.5)
+
+                            retries = 5
+                            while retries > 0:
+                                try:
+                                    with open(BRAIN_OUTPUT, "r", encoding="utf-8") as f:
+                                        action_data = json.load(f)
+                                    if action_data.get("action") == "inject_js" and "payload" in action_data:
+                                        payload = action_data["payload"]
+                                        if "code_file" in payload:
+                                            script_filename = os.path.basename(payload["code_file"])
+                                            if os.path.exists(script_filename):
+                                                with open(script_filename, "r", encoding="utf-8") as sf:
+                                                    payload["code"] = sf.read()
+                                                os.remove(script_filename)
+                                    os.remove(BRAIN_OUTPUT)
+                                    os.remove(BRAIN_INPUT)
+                                    break
+                                except (json.JSONDecodeError, PermissionError) as e:
+                                    retries -= 1
+                                    if retries == 0:
+                                        action_data = {"thought": "Error reading brain file.", "action": "post_message", "payload": {"message": f"Tunnel error: {str(e)}"}}
+                                        if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
+                                        if os.path.exists(BRAIN_INPUT): os.remove(BRAIN_INPUT)
+                                    else:
+                                        await asyncio.sleep(0.2)
+                                except Exception as e:
+                                    action_data = {"thought": "Error reading brain file.", "action": "post_message", "payload": {"message": f"Tunnel error: {str(e)}"}}
+                                    if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
+                                    if os.path.exists(BRAIN_INPUT): os.remove(BRAIN_INPUT)
+                                    break
+
+                            # After search → Brain might issue another local action or a browser action
+                            # If it's another local action, we need to recurse (but for safety, send to extension)
+                            action_name = action_data.get('action')
+                            if action_name in LOCAL_ACTIONS and action_name != "refresh_files":
+                                # One more local round, then force to extension
+                                logger.info(f"Chained local action: {action_name}")
+                                search_results = handle_local_search(action_name, action_data.get("payload", {}))
+                                if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
+                                temp_input = f"{BRAIN_INPUT}.tmp"
+                                with open(temp_input, "w", encoding="utf-8") as f:
+                                    json.dump({
+                                        "tab_id": tab_id,
+                                        "query": session.get("user_query"),
+                                        "search_results": search_results,
+                                        "action_performed": action_name,
+                                        "screenshot_path": screenshot_rel_path,
+                                        "history": session["history"]
+                                    }, f, indent=2)
+                                os.replace(temp_input, BRAIN_INPUT)
+                                # Wait for brain again
+                                while not os.path.exists(BRAIN_OUTPUT):
+                                    await asyncio.sleep(0.5)
+                                try:
+                                    with open(BRAIN_OUTPUT, "r", encoding="utf-8") as f:
+                                        action_data = json.load(f)
+                                    os.remove(BRAIN_OUTPUT)
+                                    os.remove(BRAIN_INPUT)
+                                except Exception:
+                                    action_data = {"thought": "Chain error.", "action": "post_message", "payload": {"message": "Search chain error."}}
+                                    if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
+                                    if os.path.exists(BRAIN_INPUT): os.remove(BRAIN_INPUT)
+
+                    # ── BROWSER ACTION → EXTENSION ────────────────────────
+                    action_name = action_data.get('action')
+                    if action_name and action_name not in LOCAL_ACTIONS:
+                        # Track fix attempts for inject_js and inject_css
+                        if action_name in ("inject_js", "inject_css"):
+                            attempt = record_fix_attempt(session, action_data)
+                            logger.info(f"Fix attempt #{attempt['attempt_number']} recorded: {action_name}")
+
+                        logger.info(f"Sending action to Extension: {action_name}")
+                        await websocket.send_text(json.dumps({
+                            "type": "action",
+                            "tabId": tab_id,
+                            "data": action_data
+                        }))
 
     except WebSocketDisconnect:
         logger.info(f"Extension disconnected from {client_host}")

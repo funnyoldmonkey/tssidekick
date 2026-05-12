@@ -8,6 +8,9 @@ server/crash_report.txt
 server/sessions/
 sessions/
 
+# Workflows
+.agents/
+
 # Python
 server/__pycache__/
 *.pyc
