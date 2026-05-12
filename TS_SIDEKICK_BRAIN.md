@@ -180,6 +180,25 @@ A third-party integration (chat widget, analytics, payment, social embed) is bro
 4. Check for: CSP blocking, ad blocker interference, script load order, missing container div, iframe sandbox restrictions.
 5. Common fixes: re-inject the script via `inject_js`, create missing container, adjust CSP meta tag.
 
+### PLAYBOOK: CART_CHECKOUT
+Cart not updating, discount codes failing, quantity issues, or checkout redirect problems.
+1. `search_dom("form[action*=\"/cart\"]")` to find cart forms and their hidden inputs (variant ID, quantity, properties).
+2. `search_network("/cart/add|/cart/update|/cart/change|/discount")` to see if cart API calls were made and their responses.
+3. `read_network_body` on any cart/discount endpoint to check the actual response (error messages, empty cart, discount rejection reason).
+4. `search_console("cart|discount|variant|inventory|quantity")` for JS errors related to cart operations.
+5. `search_dom("disabled")` to check if the Add to Cart or checkout button is disabled (common when variant is unavailable).
+6. Check for: wrong variant ID, out-of-stock variant submitted, discount code expired/minimum not met, app scripts intercepting cart updates (preorder/subscription apps often modify cart behavior), redirect from `/discount/{code}` not sticking, AJAX cart drawer not reflecting updated totals.
+7. Common fixes: re-enable submit button via `inject_js`, correct variant ID in hidden input, re-apply discount via `inject_js` fetch to `/discount/{code}`, remove interfering script that strips discount on cart update, dispatch cart update event to refresh drawer UI.
+
+### PLAYBOOK: PERFORMANCE_RENDER
+Page loads but elements are slow, flickering, rendering in wrong order, or showing flash of unstyled content (FOUC).
+1. `search_dom("script")` — look for render-blocking scripts in `<head>` without `defer` or `async`. Count total scripts.
+2. `search_console("layout shift|CLS|paint|render|timeout|slow")` for performance-related warnings.
+3. `search_network` — look for slow responses (large payloads, long TTFB). Check if critical resources loaded late.
+4. `inspect_element` on the flickering/shifting element — check if styles are being applied late (transition, animation, or class toggle after load).
+5. Check for: scripts blocking first paint, app blocks injecting content after DOMContentLoaded causing layout shift, lazy-loaded images without explicit width/height, CSS loaded via JS instead of `<link>`, fonts causing FOIT/FOUT, large inline scripts delaying parsing.
+6. Common fixes: add `defer`/`async` to blocking scripts via `inject_js`, set explicit dimensions on shifting elements via `inject_css`, preload critical CSS/fonts, defer non-critical third-party scripts, add `font-display: swap` for web fonts.
+
 ### PLAYBOOK: GENERAL
 No specific scenario detected — use general debugging.
 1. Review ALL sections of the diagnosis packet.

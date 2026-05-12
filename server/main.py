@@ -166,6 +166,24 @@ A third-party integration (chat widget, analytics, payment form, social embed) i
 4. Check for: CSP blocking, ad blocker interference, script load order, missing container div, iframe sandbox restrictions.
 5. Common fixes: inject the script again via `inject_js`, create missing container, adjust CSP via meta tag.
 
+### PLAYBOOK: CART_CHECKOUT
+Cart not updating, discount codes failing, quantity issues, or checkout redirect problems.
+1. `search_dom` for cart forms and hidden inputs (variant ID, quantity).
+2. `search_network("/cart/add|/cart/update|/cart/change|/discount")` for cart API calls and responses.
+3. `read_network_body` on cart/discount endpoints for error details.
+4. `search_console("cart|discount|variant|inventory")` for related JS errors.
+5. Check for: wrong variant ID, out-of-stock, discount expired/minimum not met, app scripts intercepting cart, redirect not sticking.
+6. Common fixes: re-enable submit button, correct variant ID, re-apply discount via fetch, remove interfering script, dispatch cart update event.
+
+### PLAYBOOK: PERFORMANCE_RENDER
+Page loads but elements are slow, flickering, or showing flash of unstyled content.
+1. `search_dom("script")` for render-blocking scripts without `defer`/`async`.
+2. `search_console("layout shift|CLS|paint|render|slow")` for performance warnings.
+3. `search_network` for slow/large responses.
+4. `inspect_element` on shifting elements for late-applied styles.
+5. Check for: blocking scripts in head, app blocks causing layout shift, images without dimensions, CSS loaded via JS, font FOIT/FOUT.
+6. Common fixes: add `defer`/`async` via `inject_js`, set dimensions via `inject_css`, preload critical resources, `font-display: swap`.
+
 ### PLAYBOOK: GENERAL
 No specific scenario detected — use general debugging approach.
 1. Review ALL sections of the diagnosis packet.
@@ -307,7 +325,7 @@ def handle_local_search(action_name, payload):
 
     elif action_name == "log_fix":
         # Accept entry from multiple possible payload fields (brain may use different keys)
-        entry = payload.get("entry", "") or payload.get("message", "") or payload.get("text", "") or payload.get("content", "")
+        entry = payload.get("entry", "") or payload.get("message", "") or payload.get("text", "") or payload.get("content", "") or payload.get("query", "")
         if not entry:
             logger.warning(f"⚠️ log_fix called but no entry found. Payload keys: {list(payload.keys())}")
             return {"error": f"No entry provided. Payload must include 'entry' with the formatted fix log text. Received keys: {list(payload.keys())}"}
@@ -523,6 +541,8 @@ def cross_reference_diagnostics():
         "CSS_LAYOUT": 0,
         "AUTH_SESSION": 0,
         "THIRD_PARTY_EMBED": 0,
+        "CART_CHECKOUT": 0,
+        "PERFORMANCE_RENDER": 0,
         "GENERAL": 0
     }
 
@@ -554,6 +574,29 @@ def cross_reference_diagnostics():
         broken_embeds = [e for e in diagnosis["third_party_embeds"] if e.get("has_errors") or e.get("network_status") == "FAILED"]
         if broken_embeds:
             scenario_scores["THIRD_PARTY_EMBED"] += 3
+
+    # Cart/checkout signals
+    cart_keywords_network = ['/cart/add', '/cart/update', '/cart/change', '/discount', '/checkout']
+    cart_failures = [r for r in diagnosis["failed_requests"] if any(kw in r["request"].lower() for kw in cart_keywords_network)]
+    if cart_failures:
+        scenario_scores["CART_CHECKOUT"] += 4
+    cart_keywords_console = ['cart', 'discount', 'variant', 'inventory', 'quantity', 'checkout']
+    if any(any(kw in e["message"].lower() for kw in cart_keywords_console) for e in diagnosis["console_errors"]):
+        scenario_scores["CART_CHECKOUT"] += 2
+    # Shopify cart form present boosts cart scenario slightly
+    if detected_platform == "shopify" and any(kw in dom_raw.lower() for kw in ['action="/cart/add"', '/cart/update', 'cart-drawer', 'cart-notification']):
+        scenario_scores["CART_CHECKOUT"] += 1
+
+    # Performance/render signals
+    perf_keywords = ['layout shift', 'cls', 'cumulative layout', 'render-blocking', 'long task', 'slow', 'paint', 'font']
+    if any(any(kw in e["message"].lower() for kw in perf_keywords) for e in diagnosis["console_errors"]):
+        scenario_scores["PERFORMANCE_RENDER"] += 3
+    # Many scripts = potential render blocking
+    blocking_scripts = [s for s in diagnosis["scripts"] if s["type"] == "external"]
+    if len(blocking_scripts) > 15:
+        scenario_scores["PERFORMANCE_RENDER"] += 2
+    elif len(blocking_scripts) > 10:
+        scenario_scores["PERFORMANCE_RENDER"] += 1
 
     if diagnosis["console_errors"]:
         scenario_scores["GENERAL"] += 1

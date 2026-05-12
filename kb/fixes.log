@@ -6,3 +6,25 @@ root_cause: Back in Stock app script failed to load pricing data, hiding the pri
 fix: inject_js — Restored price container display, removed error overlay, and re-enabled BIS trigger button using !important overrides.
 attempts: 1
 ---
+[2026-05-12 21:41] store: built-by-jall.myshopify.com
+scenario: SHOPIFY_APP
+tags: add-to-cart-fix, discount-ui-fix, fetch-hijack-bypass, form-id-repair
+root_cause: A third-party app hijacked the 'fetch' API to block cart additions with a fake error, combined with a script error that corrupted form IDs via input shadowing.
+fix: inject_js — Restored form IDs, updated price/discount UI, and implemented a traditional form submission bypass to circumvent the hijacked fetch and block.
+attempts: 6
+---
+[2026-05-12 22:07] store: built-by-jall.myshopify.com
+scenario: PERFORMANCE_RENDER
+tags: performance-lag, layout-shift, magenta-comic-sans, sabotage-neutralized
+root_cause: 18 fake-analytics scripts caused lag, and sabotage style/spacer elements corrupted the UI and caused layout shifts.
+fix: inject_js — Removed all fake-analytics scripts, sabotage styles, and layout spacers; added persistent CSS stabilizers.
+attempts: 1
+---
+---
+[2026-05-12 22:28] store: built-by-jall.myshopify.com
+scenario: PERFORMANCE_RENDER
+tags: performance-lag, layout-shift, magenta-comic-sans, sabotage-neutralized, title-hidden, price-hidden
+root_cause: 18 fake-analytics scripts caused lag, and sabotage style/spacer elements corrupted the UI and caused layout shifts.
+fix: inject_js — Removed all fake-analytics scripts, sabotage styles, and layout spacers; added persistent CSS stabilizers.
+attempts: 1
+---
