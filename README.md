@@ -74,8 +74,8 @@ The `diagnose()` action runs entirely server-side and pre-correlates data across
 - **Script analysis** — Finds every external and inline script, cross-references each against network logs to determine if it loaded successfully, and links scripts to their console errors by domain
 - **Hidden element detection** — Flags elements hidden by `display:none`, `visibility:hidden`, `opacity:0`, or zero dimensions
 - **Platform detection** — Auto-detects Shopify, WordPress, Wix, Squarespace, Webflow, Magento, and BigCommerce from DOM markers
-- **Scenario auto-detection** — Scores signals across 8 scenario types and recommends the right troubleshooting playbook
-- **Shopify-specific context** — Detects app blocks, product forms, cart forms, and common app containers
+- **Scenario auto-detection** — Scores signals across 10 scenario types and recommends the right troubleshooting playbook
+- **Shopify-specific context** — Detects app blocks, app embeds, product forms, cart forms, and common app containers
 - **Third-party embed detection** — Identifies 25+ services (Intercom, Drift, Stripe, Facebook, Google Analytics, etc.) and reports their load status
 - **Form analysis** — Finds all forms, checks for disabled inputs, missing CSRF tokens, and hidden required fields
 - **Auth signal detection** — Catches 401/403 errors, expired tokens, and OAuth issues from both console and network
@@ -87,12 +87,14 @@ The diagnostic engine auto-detects which playbook to follow:
 | Scenario | Triggers On |
 |---|---|
 | **WIDGET_NOT_SHOWING** | Hidden elements, failed script loads |
-| **SHOPIFY_APP** | Shopify platform + app scripts detected |
-| **FORM_SUBMISSION** | Forms present + submission errors |
+| **SHOPIFY_APP** | App-block/app-embed elements, app proxy failures, app-specific console errors |
+| **FORM_SUBMISSION** | Forms present + submission/validation errors, broken submit buttons |
 | **API_NETWORK_ERROR** | Multiple 4xx/5xx failures, CORS errors |
-| **CSS_LAYOUT** | Hidden elements, visual breakage signals |
+| **CSS_LAYOUT** | Hidden elements, CSS/layout/visibility console errors, inline style corruption |
 | **AUTH_SESSION** | 401/403 errors, token/session failures |
 | **THIRD_PARTY_EMBED** | Broken third-party scripts with errors |
+| **CART_CHECKOUT** | Cart endpoint failures, cart/variant/discount console errors, disabled ATC buttons, fake stock banners |
+| **PERFORMANCE_RENDER** | CLS/FOUC/long task console errors, excessive external scripts, late-injected stylesheets |
 | **GENERAL** | Fallback when no specific scenario scores high |
 
 ### Fix-and-Verify Loop
@@ -107,13 +109,32 @@ The agent doesn't just apply a fix and hope — it verifies:
 
 All fix attempts are tracked with code previews so the AI never repeats a failed approach.
 
-### Fix Delivery
+### Fix Delivery & Session Closure
 
 Once a fix is verified, the agent delivers:
 - Root cause explanation
 - The exact working code in a clean, copy-paste-ready block
 - Instructions on where to implement permanently (e.g., theme.liquid, custom CSS section, app settings)
 - Screenshot confirmation
+
+After delivering the fix, the agent asks the user for confirmation before closing the session. Once confirmed, the agent logs a structured summary to the knowledge base via `log_fix`.
+
+### Knowledge Base (`kb/fixes.log`)
+
+The agent learns from every session. Verified fixes are logged to `kb/fixes.log` with structured metadata:
+
+```
+---
+[2026-05-12 22:04] store: example.myshopify.com
+scenario: CART_CHECKOUT
+tags: fetch-hijack, variant-corruption, form-id-repair
+root_cause: Third-party script hijacked fetch API and corrupted variant IDs.
+fix: inject_js — Restored native fetch, repaired form IDs, bypassed cart interceptor.
+attempts: 2
+---
+```
+
+On every new session, the server searches `fixes.log` for entries matching the detected scenario or URL domain and feeds them to the brain as `relevant_fixes`. This means the agent gets smarter over time — repeat issues get diagnosed faster because the brain already knows what worked before.
 
 ### Server-Side Search Tools
 
@@ -127,6 +148,7 @@ Full observation data is written to `scratch/` files with no truncation. The AI 
 | `search_network(query)` | Grep all network requests |
 | `read_network_body(filename)` | Read the full response body of any captured request |
 | `refresh_files` | Force a fresh observation cycle |
+| `log_fix(entry)` | Append a verified fix summary to the knowledge base |
 
 ### Browser Actions
 
@@ -144,7 +166,6 @@ Actions routed to the extension for real-time execution:
 | `run_test(code)` | Execute test code, returns success/failure |
 | `inspect_element(selector)` | Full computed styles, attributes, bounding rect |
 | `observe()` | Trigger fresh observation cycle |
-| `post_message(message)` | Send notification to sidepanel |
 | `get_network_body(url)` | Fetch response body via debugger |
 | `clear_site_data(url)` | Wipe cookies, storage, and cache |
 | `capture_element(selector)` | High-res screenshot of a specific element |
@@ -186,6 +207,8 @@ tssidekick2/
 │   ├── obs_console.log         # All console logs
 │   ├── obs_network.log         # All network requests
 │   └── obs_net_bodies/         # Individual API response bodies
+├── kb/                         # Knowledge Base (persistent across sessions)
+│   └── fixes.log               # Append-only log of verified fixes
 ├── TS_SIDEKICK_BRAIN.md        # AI Brain protocol and playbooks
 ├── start.bat                   # One-click launcher
 └── README.md
