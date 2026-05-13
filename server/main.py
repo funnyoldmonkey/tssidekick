@@ -41,9 +41,10 @@ SCRATCH_DIR = os.path.join(SERVER_DIR, "..", "scratch")
 SCRATCH_NET_BODIES = os.path.join(SCRATCH_DIR, "obs_net_bodies")
 KB_DIR = os.path.join(SERVER_DIR, "..", "kb")
 KB_FIXES_LOG = os.path.join(KB_DIR, "fixes.log")
+PLAYBOOKS_PATH = os.path.join(SERVER_DIR, "..", "playbooks", "PLAYBOOKS.md")
 
 # Local search actions that don't need the extension
-LOCAL_ACTIONS = {"search_dom", "search_console", "search_network", "read_network_body", "refresh_files", "diagnose", "log_fix"}
+LOCAL_ACTIONS = {"search_dom", "search_console", "search_network", "read_network_body", "refresh_files", "diagnose", "log_fix", "search_playbook"}
 
 # Max history turns to keep (prevents free-tier context overflow)
 MAX_HISTORY_TURNS = 20
@@ -201,7 +202,7 @@ No specific scenario detected — use general debugging approach.
 ## OUTPUT FORMAT
 {
   "thought": "Detailed reasoning. Include: scenario detected, evidence found, hypothesis, fix plan, verification method.",
-  "action": "click" | "type" | "inject_js" | "inject_css" | "navigate" | "scroll" | "hover" | "post_message" | "observe" | "run_test" | "inspect_element" | "get_network_body" | "clear_site_data" | "capture_element" | "search_dom" | "search_console" | "search_network" | "read_network_body" | "refresh_files" | "diagnose",
+  "action": "click" | "type" | "inject_js" | "inject_css" | "navigate" | "scroll" | "hover" | "post_message" | "observe" | "run_test" | "inspect_element" | "get_network_body" | "clear_site_data" | "capture_element" | "click_at_position" | "search_dom" | "search_console" | "search_network" | "read_network_body" | "refresh_files" | "diagnose" | "search_playbook" | "log_fix",
   "payload": { ... }
 }
 """
@@ -337,7 +338,91 @@ def handle_local_search(action_name, payload):
         logger.info(f"📝 log_fix received entry ({len(entry)} chars)")
         return append_fix_to_kb(entry)
 
+    elif action_name == "search_playbook":
+        return _search_playbook(query)
+
     return {"error": f"Unknown local action: {action_name}"}
+
+
+def _search_playbook(query):
+    """Search PLAYBOOKS.md by section. Returns full sections whose header or tags match the query.
+    This gives the AI complete recipes, not just matching lines."""
+    if not os.path.exists(PLAYBOOKS_PATH):
+        return {"error": "PLAYBOOKS.md not found", "sections": []}
+
+    try:
+        with open(PLAYBOOKS_PATH, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        return {"error": str(e), "sections": []}
+
+    # Split into sections by ## headers
+    sections = []
+    current_header = None
+    current_lines = []
+    current_tags = ""
+
+    for line in content.split("\n"):
+        if line.startswith("## "):
+            # Save previous section
+            if current_header:
+                sections.append({
+                    "header": current_header,
+                    "tags": current_tags,
+                    "content": "\n".join(current_lines)
+                })
+            current_header = line.strip()
+            current_lines = [line]
+            current_tags = ""
+        else:
+            current_lines.append(line)
+            if line.strip().startswith("[TAGS:"):
+                current_tags = line.strip()
+
+    # Don't forget last section
+    if current_header:
+        sections.append({
+            "header": current_header,
+            "tags": current_tags,
+            "content": "\n".join(current_lines)
+        })
+
+    # Search sections — match against header, tags, and content
+    try:
+        pattern = re.compile(query, re.IGNORECASE)
+        use_regex = True
+    except re.error:
+        use_regex = False
+
+    matches = []
+    for sec in sections:
+        searchable = f"{sec['header']} {sec['tags']} {sec['content']}"
+        hit = False
+        if use_regex:
+            hit = bool(pattern.search(searchable))
+        else:
+            hit = query.lower() in searchable.lower()
+
+        if hit:
+            # Cap each section at 3000 chars to avoid blowing up brain_input
+            trimmed = sec["content"][:3000]
+            if len(sec["content"]) > 3000:
+                trimmed += "\n... [section truncated — use more specific query]"
+            matches.append({
+                "header": sec["header"],
+                "tags": sec["tags"],
+                "content": trimmed
+            })
+
+    # Cap total sections returned
+    return {
+        "query": query,
+        "file": "PLAYBOOKS.md",
+        "total_sections_matched": len(matches),
+        "sections": matches[:3],  # Max 3 sections per search — search again with different keywords for more
+        "truncated": len(matches) > 3,
+        "hint": "Use more specific queries (e.g., 'add to cart|button|broken') to narrow results." if len(matches) > 3 else ""
+    }
 
 
 def _grep_file(filepath, query):
@@ -594,7 +679,7 @@ def cross_reference_diagnostics():
     if form_console_hits:
         scenario_scores["FORM_SUBMISSION"] += min(form_console_hits * 2, 6)
     # Forms with hidden or broken submit buttons
-    if diagnosis["forms"] and any('submit' in el.get("text", "").lower() or 'form' in el.get("id", "").lower() for el in diagnosis["hidden_elements"]):
+    if diagnosis["forms"] and any('submit' in el.get("element", "").lower() or 'form' in el.get("element", "").lower() for el in diagnosis["hidden_elements"]):
         scenario_scores["FORM_SUBMISSION"] += 3
 
     if len(diagnosis["failed_requests"]) > 2:
@@ -626,7 +711,7 @@ def cross_reference_diagnostics():
         scenario_scores["CART_CHECKOUT"] += 2
     # Cart DOM sabotage signals — disabled submit buttons, sold out states, fake banners
     cart_dom_signals = 0
-    if any('add to cart' in el.get("text", "").lower() or 'cart' in el.get("id", "").lower() for el in diagnosis["hidden_elements"]):
+    if any('add to cart' in el.get("element", "").lower() or 'cart' in el.get("element", "").lower() for el in diagnosis["hidden_elements"]):
         cart_dom_signals += 3
     # Disabled submit button inside a cart form
     if 'product-form__submit' in dom_raw.lower() and ('disabled' in dom_raw.lower()):
@@ -999,6 +1084,10 @@ async def websocket_endpoint(websocket: WebSocket):
                                             payload["code"] = sf.read()
                                         logger.info(f"Tunneling script from {script_abs}...")
                                         os.remove(script_abs)
+                                    else:
+                                        logger.error(f"code_file not found: {script_abs} — inject_js will fail")
+                                        if "code" not in payload:
+                                            payload["code"] = f"console.error('TS Sidekick: code_file not found: {script_filename}');"
 
                             os.remove(BRAIN_OUTPUT)
                             break # Success
@@ -1184,6 +1273,10 @@ async def websocket_endpoint(websocket: WebSocket):
                                                 with open(script_abs, "r", encoding="utf-8") as sf:
                                                     payload["code"] = sf.read()
                                                 os.remove(script_abs)
+                                            else:
+                                                logger.error(f"code_file not found: {script_abs} — inject_js will fail")
+                                                if "code" not in payload:
+                                                    payload["code"] = f"console.error('TS Sidekick: code_file not found: {script_filename}');"
                                     os.remove(BRAIN_OUTPUT)
                                     break
                                 except (json.JSONDecodeError, PermissionError) as e:

@@ -78,6 +78,11 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     } else if (method === "Runtime.consoleAPICalled") {
         const args = params.args.map(a => a.value || a.description).join(' ');
         diagnostics.logs.push(`[console] ${args}`);
+    } else if (method === "Network.loadingFailed") {
+        // Captures network-level failures: DNS errors, connection refused, CORS preflight blocks, timeouts
+        const { requestId, errorText, type } = params;
+        // Try to find the URL from a prior requestWillBeSent event (not always available)
+        diagnostics.network.push(`🚨 FAILED: [${type || 'unknown'}] ${errorText} (network error — no HTTP response)`);
     } else if (method === "Network.responseReceived") {
         const { requestId, response } = params;
         if (response.status >= 400) {
@@ -256,33 +261,43 @@ async function performAction(tabId, actionData) {
                 });
             });
         } else if (action === "click") {
-            await chrome.scripting.executeScript({
+            const clickResult = await chrome.scripting.executeScript({
                 target: { tabId },
-                func: (sel) => { 
+                func: (sel) => {
                     const el = document.querySelector(sel);
                     if (el) {
                         el.scrollIntoView({ behavior: 'smooth', block: 'center' });
                         el.style.outline = "5px solid #22c55e";
                         el.style.outlineOffset = "2px";
                         setTimeout(() => el.click(), 500);
+                        return true;
                     }
+                    return false;
                 },
                 args: [payload.selector]
             });
+            if (clickResult && clickResult[0] && !clickResult[0].result) {
+                diagnostics.logs.push(`[error] click: selector not found — "${payload.selector}"`);
+            }
         } else if (action === "type") {
-            await chrome.scripting.executeScript({
+            const typeResult = await chrome.scripting.executeScript({
                 target: { tabId },
-                func: (sel, txt) => { 
+                func: (sel, txt) => {
                     const el = document.querySelector(sel);
-                    if (el) { 
+                    if (el) {
                         el.focus();
-                        el.value = txt; 
-                        el.dispatchEvent(new Event('input', { bubbles: true })); 
+                        el.value = txt;
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
                         el.dispatchEvent(new Event('change', { bubbles: true }));
+                        return true;
                     }
+                    return false;
                 },
                 args: [payload.selector, payload.text]
             });
+            if (typeResult && typeResult[0] && !typeResult[0].result) {
+                diagnostics.logs.push(`[error] type: selector not found — "${payload.selector}"`);
+            }
         } else if (action === "scroll") {
             await chrome.scripting.executeScript({
                 target: { tabId },
@@ -296,17 +311,22 @@ async function performAction(tabId, actionData) {
                 chrome.tabs.onUpdated.addListener(l);
             });
         } else if (action === "hover") {
-            await chrome.scripting.executeScript({
+            const hoverResult = await chrome.scripting.executeScript({
                 target: { tabId },
                 func: (sel) => {
                     const el = document.querySelector(sel);
                     if (el) {
                         el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
                         el.style.outline = "2px dashed orange";
+                        return true;
                     }
+                    return false;
                 },
                 args: [payload.selector]
             });
+            if (hoverResult && hoverResult[0] && !hoverResult[0].result) {
+                diagnostics.logs.push(`[error] hover: selector not found — "${payload.selector}"`);
+            }
         } else if (action === "inject_css") {
             await chrome.scripting.insertCSS({
                 target: { tabId },
@@ -356,9 +376,11 @@ async function performAction(tabId, actionData) {
                     diagnostics.logs.push(`🔍 ELEMENT CAPTURED: ${payload.selector} at ${x},${y}`);
                     diagnostics.element_capture = { selector: payload.selector, data: screenshot, x, y, w, h, dpr };
                 }
+            } else {
+                diagnostics.logs.push(`[error] capture_element: selector not found — "${payload.selector}"`);
             }
         } else if (action === "click_at_position") {
-            await chrome.scripting.executeScript({
+            const posResult = await chrome.scripting.executeScript({
                 target: { tabId },
                 func: (x, y) => {
                     const el = document.elementFromPoint(x, y);
@@ -379,11 +401,17 @@ async function performAction(tabId, actionData) {
                             el.click();
                             dot.remove();
                         }, 500);
+                        return true;
                     }
+                    return false;
                 },
                 args: [payload.x, payload.y]
             });
-            diagnostics.logs.push(`🖱️ CLICK AT POSITION: ${payload.x}, ${payload.y}`);
+            if (posResult && posResult[0] && !posResult[0].result) {
+                diagnostics.logs.push(`[error] click_at_position: no element found at (${payload.x}, ${payload.y})`);
+            } else {
+                diagnostics.logs.push(`🖱️ CLICK AT POSITION: ${payload.x}, ${payload.y}`);
+            }
         } else if (action === "inspect_element") {
             const data = await chrome.scripting.executeScript({
                 target: { tabId },
@@ -414,6 +442,9 @@ async function performAction(tabId, actionData) {
                 },
                 args: [payload.selector]
             });
+            if (data[0].result === "NOT_FOUND") {
+                diagnostics.logs.push(`[error] inspect_element: selector not found — "${payload.selector}"`);
+            }
             diagnostics.logs.push(`>>> INSPECT [${payload.selector}]: ${JSON.stringify(data[0].result)}`);
         } else if (action === "post_message") {
             // Forward message to user via sidepanel
