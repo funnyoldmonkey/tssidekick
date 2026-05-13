@@ -7,6 +7,7 @@ server/server.log
 server/crash_report.txt
 server/sessions/
 server/brain_ready.flag
+server/brain_input.json.tmp
 sessions/
 
 # Workflows
@@ -28,6 +29,7 @@ tssidekick_log.txt
 
 # OpenCode Swarm
 .opencode/
+.swarm/
 
 # Scratch & KB (runtime data)
 scratch/
@@ -36,3 +38,6 @@ kb/
 # One-off utility scripts
 server/bis_widget.js
 server/check_image.py
+
+# Stress test (local only)
+test/
