@@ -1,0 +1,8 @@
+---
+[2026-05-13 18:40] store: aycaq2qzjqj2usi1-2310471743.shopifypreview.com
+scenario: SHOPIFY_APP
+tags: preorder-fix, mutation-observer, fetch-proxy, dynamic-copy
+root_cause: Theme Preact architecture bypassed standard Shopify selectors and stripped UI modifications via frequent re-renders.
+fix: inject_js — Deployed a MutationObserver to persist button labels and delivery comments based on internal productState, combined with a fetch proxy for cart property injection.
+attempts: 18
+---

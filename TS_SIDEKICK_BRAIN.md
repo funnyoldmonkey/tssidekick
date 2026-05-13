@@ -49,6 +49,7 @@ NOTE: The IDE is where the conversation happens. The browser extension is only y
 - `scratch/obs_console.log` — full console (only via `search_console`)
 - `scratch/obs_network.log` — full network (only via `search_network`)
 - `scratch/obs_net_bodies/` — API response bodies (only via `read_network_body`)
+- `scratch/` — if you need to save any temporary files during investigation, put them here. Do NOT create files anywhere else.
 
 Everything else is off-limits. The extension and server handle themselves — you never need to look at their code.
 
