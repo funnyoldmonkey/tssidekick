@@ -11,8 +11,11 @@ import logging
 import codecs
 import sys
 
+# Anchor all paths to server/ directory early
+SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Setup logging to file
-log_file = os.path.join(os.path.dirname(__file__), "server.log")
+log_file = os.path.join(SERVER_DIR, "server.log")
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -28,15 +31,15 @@ app = FastAPI()
 # Store sessions: {tab_id: {"history": [], "model": "gemma-4-31b-it"}}
 sessions = {}
 
-# File paths and directories
-SESSIONS_DIR = "sessions"
-BRAIN_INPUT = "brain_input.json"
-BRAIN_OUTPUT = "brain_output.json"
-BRAIN_READY_FLAG = "brain_ready.flag"
+# File paths and directories (all anchored to SERVER_DIR)
+SESSIONS_DIR = os.path.join(SERVER_DIR, "sessions")
+BRAIN_INPUT = os.path.join(SERVER_DIR, "brain_input.json")
+BRAIN_OUTPUT = os.path.join(SERVER_DIR, "brain_output.json")
+BRAIN_READY_FLAG = os.path.join(SERVER_DIR, "brain_ready.flag")
 brain_turn_counter = 0
-SCRATCH_DIR = os.path.join(os.path.dirname(__file__), "..", "scratch")
+SCRATCH_DIR = os.path.join(SERVER_DIR, "..", "scratch")
 SCRATCH_NET_BODIES = os.path.join(SCRATCH_DIR, "obs_net_bodies")
-KB_DIR = os.path.join(os.path.dirname(__file__), "..", "kb")
+KB_DIR = os.path.join(SERVER_DIR, "..", "kb")
 KB_FIXES_LOG = os.path.join(KB_DIR, "fixes.log")
 
 # Local search actions that don't need the extension
@@ -46,7 +49,7 @@ LOCAL_ACTIONS = {"search_dom", "search_console", "search_network", "read_network
 MAX_HISTORY_TURNS = 20
 
 # Path to the brain protocol doc (injected into brain_input.json every turn)
-BRAIN_PROTOCOL_PATH = os.path.join(os.path.dirname(__file__), "..", "TS_SIDEKICK_BRAIN.md")
+BRAIN_PROTOCOL_PATH = os.path.join(SERVER_DIR, "..", "TS_SIDEKICK_BRAIN.md")
 
 for d in [SESSIONS_DIR, SCRATCH_DIR, SCRATCH_NET_BODIES, KB_DIR]:
     os.makedirs(d, exist_ok=True)
@@ -866,7 +869,7 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             raw_data = await websocket.receive_text()
-            with open("heartbeat.txt", "w") as f: f.write(f"Received message at {asyncio.get_event_loop().time()}")
+            with open(os.path.join(SERVER_DIR, "heartbeat.txt"), "w") as f: f.write(f"Received message at {asyncio.get_event_loop().time()}")
             message = json.loads(raw_data)
             
             msg_type = message.get("type")
@@ -905,7 +908,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     logger.info(f"Handing over to Antigravity Brain for Tab {tab_id}...")
                     
                     # Handle Screenshot with timestamp
-                    screenshot_rel_path = "current_view.png"
+                    screenshot_rel_path = os.path.join(SERVER_DIR, "current_view.png")
                     if "screenshot" in obs and obs["screenshot"]:
                         try:
                             timestamp = int(time.time())
@@ -913,17 +916,17 @@ async def websocket_endpoint(websocket: WebSocket):
                             session_path = os.path.join(SESSIONS_DIR, tab_id)
                             if not os.path.exists(session_path):
                                 os.makedirs(session_path)
-                            
+
                             filename = f"view_{timestamp}.png"
                             filepath = os.path.join(session_path, filename)
                             with open(filepath, "wb") as f:
                                 f.write(base64.b64decode(encoded))
-                            
-                            # Also update the root current_view.png for easy IDE access
-                            with open("current_view.png", "wb") as f:
+
+                            # Also update the server/current_view.png for easy IDE access
+                            with open(os.path.join(SERVER_DIR, "current_view.png"), "wb") as f:
                                 f.write(base64.b64decode(encoded))
-                            
-                            screenshot_rel_path = f"sessions/{tab_id}/{filename}"
+
+                            screenshot_rel_path = os.path.join(SESSIONS_DIR, tab_id, filename)
                             logger.info(f"Screenshot saved to {filepath}")
                         except Exception as e:
                             logger.error(f"Failed to save screenshot: {e}")
@@ -990,11 +993,12 @@ async def websocket_endpoint(websocket: WebSocket):
                                 if "code_file" in payload:
                                     script_path = payload["code_file"]
                                     script_filename = os.path.basename(script_path)
-                                    if os.path.exists(script_filename):
-                                        with open(script_filename, "r", encoding="utf-8") as sf:
+                                    script_abs = os.path.join(SERVER_DIR, script_filename)
+                                    if os.path.exists(script_abs):
+                                        with open(script_abs, "r", encoding="utf-8") as sf:
                                             payload["code"] = sf.read()
-                                        logger.info(f"Tunneling script from {script_filename}...")
-                                        os.remove(script_filename)
+                                        logger.info(f"Tunneling script from {script_abs}...")
+                                        os.remove(script_abs)
 
                             os.remove(BRAIN_OUTPUT)
                             break # Success
@@ -1175,10 +1179,11 @@ async def websocket_endpoint(websocket: WebSocket):
                                         payload = action_data["payload"]
                                         if "code_file" in payload:
                                             script_filename = os.path.basename(payload["code_file"])
-                                            if os.path.exists(script_filename):
-                                                with open(script_filename, "r", encoding="utf-8") as sf:
+                                            script_abs = os.path.join(SERVER_DIR, script_filename)
+                                            if os.path.exists(script_abs):
+                                                with open(script_abs, "r", encoding="utf-8") as sf:
                                                     payload["code"] = sf.read()
-                                                os.remove(script_filename)
+                                                os.remove(script_abs)
                                     os.remove(BRAIN_OUTPUT)
                                     break
                                 except (json.JSONDecodeError, PermissionError) as e:
@@ -1354,6 +1359,6 @@ if __name__ == "__main__":
         setup_tray()
     except Exception as e:
         logger.error(f"CRITICAL STARTUP ERROR: {e}", exc_info=True)
-        with open("crash_report.txt", "w") as f:
+        with open(os.path.join(SERVER_DIR, "crash_report.txt"), "w") as f:
             f.write(str(e))
         os._exit(1)

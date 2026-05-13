@@ -55,10 +55,7 @@ function connectSocket() {
         } else if (msg.type === "action") {
             if (sidepanelPort) sidepanelPort.postMessage({ type: "agent_response", data: msg.data });
             await performAction(parseInt(msg.tabId), msg.data);
-            
-            // Re-capture and update sidepanel after action
-            const observation = await captureObservation(parseInt(msg.tabId));
-            if (sidepanelPort) sidepanelPort.postMessage({ type: "observation_update", data: observation });
+            // Sidepanel updates on the next real observation turn — no redundant capture here
         } else if (msg.type === "error") {
             if (sidepanelPort) sidepanelPort.postMessage({ type: "agent_status", message: `Error: ${msg.message}` });
         }
@@ -168,27 +165,31 @@ async function captureObservation(tabId) {
                     const type = el.type ? `[type="${el.type}"]` : '';
 
                     const interactive = ["BUTTON", "A", "INPUT", "SELECT", "TEXTAREA"];
-                    const hasClick = el.onclick || el.getAttribute('role') === 'button' || window.getComputedStyle(el).cursor === 'pointer';
-                    const isInteractive = interactive.includes(el.tagName) || hasClick;
+                    const hasClick = el.onclick || el.getAttribute('role') === 'button';
+                    let isInteractive = interactive.includes(el.tagName) || hasClick;
 
-                    // Full text for all elements — no truncation
+                    // Full text for interactive elements, direct text only for containers
                     const text = (el.innerText || el.value || el.title || '').trim();
-                    // Only include direct text (not children's text) for non-interactive containers
                     const directText = isInteractive ? text : Array.from(el.childNodes)
                         .filter(n => n.nodeType === 3)
                         .map(n => n.textContent.trim())
                         .filter(t => t.length > 0)
                         .join(' ');
 
-                    // Check computed visibility for potential hidden-element detection
+                    // Only check computed style on interactive elements and elements with content
+                    // This avoids forcing layout reflow on every single DOM node
                     let visFlag = '';
-                    try {
-                        const cs = window.getComputedStyle(el);
-                        if (cs.display === 'none') visFlag = ' [HIDDEN:display]';
-                        else if (cs.visibility === 'hidden') visFlag = ' [HIDDEN:visibility]';
-                        else if (cs.opacity === '0') visFlag = ' [HIDDEN:opacity]';
-                        else if (el.offsetWidth === 0 && el.offsetHeight === 0 && !isInteractive) visFlag = ' [HIDDEN:zero-size]';
-                    } catch(e) {}
+                    if (isInteractive || id || directText) {
+                        try {
+                            const cs = window.getComputedStyle(el);
+                            if (cs.display === 'none') visFlag = ' [HIDDEN:display]';
+                            else if (cs.visibility === 'hidden') visFlag = ' [HIDDEN:visibility]';
+                            else if (cs.opacity === '0') visFlag = ' [HIDDEN:opacity]';
+                            else if (el.offsetWidth === 0 && el.offsetHeight === 0 && !isInteractive) visFlag = ' [HIDDEN:zero-size]';
+                            // Check cursor:pointer only when we need to (deferred from above)
+                            if (!isInteractive && cs.cursor === 'pointer') isInteractive = true;
+                        } catch(e) {}
+                    }
 
                     if (!directText && !isInteractive && !id && !visFlag) return null;
 
@@ -205,9 +206,11 @@ async function captureObservation(tabId) {
 
         const pageData = results[0].result;
 
-        // Send ALL logs and network data — no truncation, server handles file writing
+        // Snapshot current diagnostics then clear for next turn
         const allLogs = diagnostics.logs.join('\n') || "No console logs.";
         const allNetwork = diagnostics.network.join('\n') || "No network issues.";
+        diagnostics.logs = [];
+        diagnostics.network = [];
 
         let screenshot = null;
         try {
