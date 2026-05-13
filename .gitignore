@@ -6,6 +6,7 @@ server/current_view.png
 server/server.log
 server/crash_report.txt
 server/sessions/
+server/brain_ready.flag
 sessions/
 
 # Workflows
@@ -31,3 +32,6 @@ scratch/
 
 #KB
 kb/
+
+#Testing
+test/

@@ -43,6 +43,7 @@ NOTE: The IDE is where the conversation happens. The browser extension is only y
 - `TS_SIDEKICK_BRAIN.md` — your playbook (read once on first turn)
 - `server/brain_input.json` — the live data feed from the extension (read every turn)
 - `server/brain_output.json` — where you write your actions
+- `server/brain_ready.flag` — signal that `brain_input.json` has fresh data (see Wait Protocol below)
 - `server/current_view.png` — the latest screenshot
 - `scratch/obs_dom.txt` — full DOM (only when you need to search it via `search_dom`)
 - `scratch/obs_console.log` — full console (only via `search_console`)
@@ -326,4 +327,55 @@ Past verified fixes are stored in `kb/fixes.log`. On every turn, the server sear
     "message": "message_to_user",
     "query": "search_query",
     "filename": "network_body_filename"
+  }
+}
+```
+
+## ⚠️ OUTPUT FORMAT — CRITICAL
+**You MUST write your response as JSON to `server/brain_output.json`.** Do NOT respond in the IDE chat (except for greetings and delivering verified fixes to the user). Every action you take goes through `brain_output.json` — never type actions into the chat.
+
+Example — to run a diagnose:
+```json
+{
+  "thought": "Starting diagnosis to detect the scenario and gather evidence.",
+  "action": "diagnose",
+  "payload": {}
+}
+```
+
+Example — to search the DOM:
+```json
+{
+  "thought": "Looking for hidden price elements that might be styled with display:none.",
+  "action": "search_dom",
+  "payload": { "query": "price" }
+}
+```
+
+Example — to inject a CSS fix:
+```json
+{
+  "thought": "Price element is hidden by inline style. Overriding with !important.",
+  "action": "inject_css",
+  "payload": { "css": ".product-price { display: block !important; visibility: visible !important; }" }
+}
+```
+
+**Write ONLY valid JSON. No markdown, no explanation, no extra text. Just the JSON object to `server/brain_output.json`.**
+
+## ⏳ WAIT PROTOCOL — DO NOT SKIP
+After writing your action to `server/brain_output.json`, you MUST wait before reading `server/brain_input.json` again. The server needs time to process your action, send it to the extension, and receive fresh observation data.
+
+**The signal file: `server/brain_ready.flag`**
+
+This file contains a **turn number** (e.g., `1`, `2`, `3`...). The server increments it every time it writes fresh data to `brain_input.json`. You use it to know whether `brain_input.json` has been updated since you last read it.
+
+Follow this exact sequence every turn:
+1. Write your action JSON to `server/brain_output.json`.
+2. **WAIT** — read `server/brain_ready.flag` and check the number inside. If it is the **same number** you saw on your last turn, the data is stale — keep waiting and re-check. If the number has **changed** (incremented), fresh data is ready.
+3. Once you see a new turn number, read `server/brain_input.json` (it now has fresh data).
+4. Remember the current turn number for comparison on your next turn.
+5. Process the new data, decide your next action, go to step 1.
+
+**CRITICAL: If the turn number in `brain_ready.flag` has NOT changed since your last read, `brain_input.json` contains STALE data. Do NOT act on stale data. Do NOT fall back to reading source code, opening files, or using IDE tools. Just keep polling `brain_ready.flag` until the number changes.**
   

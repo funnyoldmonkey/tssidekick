@@ -32,6 +32,8 @@ sessions = {}
 SESSIONS_DIR = "sessions"
 BRAIN_INPUT = "brain_input.json"
 BRAIN_OUTPUT = "brain_output.json"
+BRAIN_READY_FLAG = "brain_ready.flag"
+brain_turn_counter = 0
 SCRATCH_DIR = os.path.join(os.path.dirname(__file__), "..", "scratch")
 SCRATCH_NET_BODIES = os.path.join(SCRATCH_DIR, "obs_net_bodies")
 KB_DIR = os.path.join(os.path.dirname(__file__), "..", "kb")
@@ -43,8 +45,8 @@ LOCAL_ACTIONS = {"search_dom", "search_console", "search_network", "read_network
 # Max history turns to keep (prevents free-tier context overflow)
 MAX_HISTORY_TURNS = 20
 
-# How often to nudge the Brain to re-read the full playbook
-BRAIN_REREAD_INTERVAL = 4
+# Path to the brain protocol doc (injected into brain_input.json every turn)
+BRAIN_PROTOCOL_PATH = os.path.join(os.path.dirname(__file__), "..", "TS_SIDEKICK_BRAIN.md")
 
 for d in [SESSIONS_DIR, SCRATCH_DIR, SCRATCH_NET_BODIES, KB_DIR]:
     os.makedirs(d, exist_ok=True)
@@ -776,30 +778,24 @@ def find_relevant_fixes(scenario, url):
     return matches[-5:]
 
 
-# ── Brain Rules Reminder ────────────────────────────────────────────────────
+# ── Brain Protocol Injection ────────────────────────────────────────────────
 
-def build_rules_reminder(session):
-    """Build the _rules block for brain_input.json.
-    Every turn gets the compact cheat sheet.
-    Every BRAIN_REREAD_INTERVAL turns, add a nudge to re-read the full playbook."""
-    if "turn_count" not in session:
-        session["turn_count"] = 0
-    session["turn_count"] += 1
-
-    rules = {
-        "tools": "ONLY use actions via server/brain_output.json. NEVER use Chrome MCPs, Puppeteer, browser_use, or any external browser tool.",
-        "files": "ONLY read: server/brain_input.json, server/brain_output.json, server/current_view.png, scratch/ files. NEVER open server/main.py, extension/, .swarm/, README.md, or any source code.",
-        "workflow": "diagnose → search → fix → VERIFY via screenshot+DOM → if not fixed, try DIFFERENT approach → after 3 failures, report to user in IDE chat.",
-        "selectors": "Use RESILIENT selectors (class, attribute, data-*). NEVER use template-specific IDs in delivered fix code.",
-        "silence": "Do NOT respond in the IDE until fix is VERIFIED working or 3+ attempts exhausted. NEVER use post_message — all communication in IDE chat only.",
-        "closure": "After delivering a fix, you MUST ask the user 'Is everything looking good? Can I close out this session?' and WAIT for confirmation before writing log_fix. NEVER skip this step."
-    }
-
-    if session["turn_count"] % BRAIN_REREAD_INTERVAL == 0:
-        rules["⚠️ REFRESH"] = "You have been working for several turns. Re-read TS_SIDEKICK_BRAIN.md now to ensure you are following the full protocol. Do not skip this."
-        logger.info(f"Turn {session['turn_count']}: Brain reread nudge added to _rules")
-
-    return rules
+def load_brain_protocol():
+    """Read TS_SIDEKICK_BRAIN.md from disk and return it with a framing instruction.
+    This is injected into brain_input.json every turn as the _protocol field,
+    so the AI always has the full playbook in context. Reads fresh every turn
+    so edits to the doc propagate automatically."""
+    try:
+        with open(BRAIN_PROTOCOL_PATH, "r", encoding="utf-8") as f:
+            content = f.read()
+        return (
+            "⚠️ CRITICAL INSTRUCTIONS — Read every line below before taking any action. "
+            "These are your rules, tools, and playbooks. Do not skip, summarize, or assume you remember them.\n\n"
+            + content
+        )
+    except Exception as e:
+        logger.error(f"Failed to read brain protocol from {BRAIN_PROTOCOL_PATH}: {e}")
+        return "⚠️ CRITICAL: Could not load protocol. Read TS_SIDEKICK_BRAIN.md immediately before taking any action."
 
 
 # ── Fix Attempt Tracking ─────────────────────────────────────────────────────
@@ -944,14 +940,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Ensure no stale output exists
                     if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
 
-                    # Build brain input with fix attempt history
+                    # Build brain input with full protocol + fix attempt history
                     brain_payload = {
+                        "_protocol": load_brain_protocol(),
                         "tab_id": tab_id,
                         "query": user_query,
                         "observation": slim_obs,
                         "screenshot_path": screenshot_rel_path,
-                        "history": session["history"],
-                        "_rules": build_rules_reminder(session)
+                        "history": session["history"]
                     }
 
                     # Include fix attempt summary if any attempts have been made
@@ -971,13 +967,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     with open(temp_input, "w", encoding="utf-8") as f:
                         json.dump(brain_payload, f, indent=2)
                     os.replace(temp_input, BRAIN_INPUT)
-                    logger.info(f"Slim observation written to {BRAIN_INPUT}, full data in scratch/")
+                    global brain_turn_counter
+                    brain_turn_counter += 1
+                    with open(BRAIN_READY_FLAG, "w") as f:
+                        f.write(str(brain_turn_counter))
+                    logger.info(f"Slim observation written to {BRAIN_INPUT}, turn #{brain_turn_counter}, full data in scratch/")
 
                     logger.info("Waiting for Antigravity Brain response (brain_output.json)...")
-                    
+
                     while not os.path.exists(BRAIN_OUTPUT):
                         await asyncio.sleep(0.5)
-                    
+
                     # Robust read with retries to avoid race conditions
                     retries = 5
                     while retries > 0:
@@ -995,24 +995,84 @@ async def websocket_endpoint(websocket: WebSocket):
                                             payload["code"] = sf.read()
                                         logger.info(f"Tunneling script from {script_filename}...")
                                         os.remove(script_filename)
-                            
+
                             os.remove(BRAIN_OUTPUT)
-                            # Keep brain_input.json — IDE may still need to read it.
-                            # It will be overwritten by the next observation cycle.
                             break # Success
                         except (json.JSONDecodeError, PermissionError) as e:
                             retries -= 1
                             if retries == 0:
-                                logger.error(f"Error reading brain_output.json after retries: {e}")
-                                action_data = {"thought": "Error reading brain file.", "action": "answer_user", "payload": {"message": f"Tunnel error: {str(e)}"}}
+                                logger.error(f"Malformed JSON in brain_output.json after retries: {e}")
+                                # Read raw content so we can show the model what it wrote
+                                raw_output = ""
+                                try:
+                                    with open(BRAIN_OUTPUT, "r", encoding="utf-8") as f:
+                                        raw_output = f.read()[:500]
+                                except Exception:
+                                    raw_output = "(could not read raw content)"
                                 if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
+                                # Write error feedback to brain_input.json so model can self-correct
+                                error_payload = {
+                                    "_protocol": load_brain_protocol(),
+                                    "tab_id": tab_id,
+                                    "query": user_query,
+                                    "error": {
+                                        "type": "MALFORMED_JSON",
+                                        "message": f"Your last brain_output.json was not valid JSON. Parse error: {str(e)}",
+                                        "raw_output_preview": raw_output,
+                                        "instructions": "You MUST write valid JSON to server/brain_output.json. Check for: unescaped quotes inside strings, missing commas, line breaks in string values (use \\n instead), and unclosed braces. See the Technical Schema and examples in the protocol above. Try your last action again with properly formatted JSON."
+                                    },
+                                    "screenshot_path": screenshot_rel_path,
+                                    "history": session["history"]
+                                }
+                                temp_input = f"{BRAIN_INPUT}.tmp"
+                                with open(temp_input, "w", encoding="utf-8") as f:
+                                    json.dump(error_payload, f, indent=2)
+                                os.replace(temp_input, BRAIN_INPUT)
+                                brain_turn_counter += 1
+                                with open(BRAIN_READY_FLAG, "w") as f:
+                                    f.write(str(brain_turn_counter))
+                                logger.info(f"JSON error feedback written to {BRAIN_INPUT}, turn #{brain_turn_counter}")
+                                # Go back to waiting for a corrected response
+                                while not os.path.exists(BRAIN_OUTPUT):
+                                    await asyncio.sleep(0.5)
+                                retries = 5
+                                continue
                             else:
                                 await asyncio.sleep(0.2)
                         except Exception as e:
                             logger.error(f"Unexpected error reading brain_output.json: {e}")
-                            action_data = {"thought": "Error reading brain file.", "action": "answer_user", "payload": {"message": f"Tunnel error: {str(e)}"}}
+                            raw_output = ""
+                            try:
+                                with open(BRAIN_OUTPUT, "r", encoding="utf-8") as f:
+                                    raw_output = f.read()[:500]
+                            except Exception:
+                                raw_output = "(could not read raw content)"
                             if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
-                            break
+                            error_payload = {
+                                "_protocol": load_brain_protocol(),
+                                "tab_id": tab_id,
+                                "query": user_query,
+                                "error": {
+                                    "type": "MALFORMED_JSON",
+                                    "message": f"Your last brain_output.json caused an error: {str(e)}",
+                                    "raw_output_preview": raw_output,
+                                    "instructions": "You MUST write valid JSON to server/brain_output.json. Check for: unescaped quotes inside strings, missing commas, line breaks in string values (use \\n instead), and unclosed braces. See the Technical Schema and examples in the protocol above. Try your last action again with properly formatted JSON."
+                                },
+                                "screenshot_path": screenshot_rel_path,
+                                "history": session["history"]
+                            }
+                            temp_input = f"{BRAIN_INPUT}.tmp"
+                            with open(temp_input, "w", encoding="utf-8") as f:
+                                json.dump(error_payload, f, indent=2)
+                            os.replace(temp_input, BRAIN_INPUT)
+                            brain_turn_counter += 1
+                            with open(BRAIN_READY_FLAG, "w") as f:
+                                f.write(str(brain_turn_counter))
+                            logger.info(f"Error feedback written to {BRAIN_INPUT}, turn #{brain_turn_counter}")
+                            while not os.path.exists(BRAIN_OUTPUT):
+                                await asyncio.sleep(0.5)
+                            retries = 5
+                            continue
 
                 else:
                     # STANDARD GEMMA MODE
@@ -1076,13 +1136,13 @@ async def websocket_endpoint(websocket: WebSocket):
                             # Write results directly to brain_input.json — no extension involved
                             if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
                             search_payload = {
+                                "_protocol": load_brain_protocol(),
                                 "tab_id": tab_id,
                                 "query": session.get("user_query"),
                                 "search_results": search_results,
                                 "action_performed": action_name,
                                 "screenshot_path": screenshot_rel_path,
-                                "history": session["history"],
-                                "_rules": build_rules_reminder(session)
+                                "history": session["history"]
                             }
 
                             # Include relevant past fixes from knowledge base
@@ -1097,7 +1157,10 @@ async def websocket_endpoint(websocket: WebSocket):
                             with open(temp_input, "w", encoding="utf-8") as f:
                                 json.dump(search_payload, f, indent=2)
                             os.replace(temp_input, BRAIN_INPUT)
-                            logger.info(f"Search results written to {BRAIN_INPUT}, waiting for next Brain action...")
+                            brain_turn_counter += 1
+                            with open(BRAIN_READY_FLAG, "w") as f:
+                                f.write(str(brain_turn_counter))
+                            logger.info(f"Search results written to {BRAIN_INPUT}, turn #{brain_turn_counter}, waiting for next Brain action...")
 
                             # Wait for the Brain's next response
                             while not os.path.exists(BRAIN_OUTPUT):
@@ -1117,19 +1180,79 @@ async def websocket_endpoint(websocket: WebSocket):
                                                     payload["code"] = sf.read()
                                                 os.remove(script_filename)
                                     os.remove(BRAIN_OUTPUT)
-                                    # Keep brain_input.json for IDE access
                                     break
                                 except (json.JSONDecodeError, PermissionError) as e:
                                     retries -= 1
                                     if retries == 0:
-                                        action_data = {"thought": "Error reading brain file.", "action": "post_message", "payload": {"message": f"Tunnel error: {str(e)}"}}
+                                        logger.error(f"Malformed JSON in brain_output.json (search loop): {e}")
+                                        raw_output = ""
+                                        try:
+                                            with open(BRAIN_OUTPUT, "r", encoding="utf-8") as f:
+                                                raw_output = f.read()[:500]
+                                        except Exception:
+                                            raw_output = "(could not read raw content)"
                                         if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
+                                        error_payload = {
+                                            "_protocol": load_brain_protocol(),
+                                            "tab_id": tab_id,
+                                            "query": session.get("user_query"),
+                                            "error": {
+                                                "type": "MALFORMED_JSON",
+                                                "message": f"Your last brain_output.json was not valid JSON. Parse error: {str(e)}",
+                                                "raw_output_preview": raw_output,
+                                                "instructions": "You MUST write valid JSON to server/brain_output.json. Check for: unescaped quotes inside strings, missing commas, line breaks in string values (use \\n instead), and unclosed braces. See the Technical Schema and examples in the protocol above. Try your last action again with properly formatted JSON."
+                                            },
+                                            "screenshot_path": screenshot_rel_path,
+                                            "history": session["history"]
+                                        }
+                                        temp_input = f"{BRAIN_INPUT}.tmp"
+                                        with open(temp_input, "w", encoding="utf-8") as f:
+                                            json.dump(error_payload, f, indent=2)
+                                        os.replace(temp_input, BRAIN_INPUT)
+                                        brain_turn_counter += 1
+                                        with open(BRAIN_READY_FLAG, "w") as f:
+                                            f.write(str(brain_turn_counter))
+                                        logger.info(f"JSON error feedback written to {BRAIN_INPUT}, turn #{brain_turn_counter}")
+                                        while not os.path.exists(BRAIN_OUTPUT):
+                                            await asyncio.sleep(0.5)
+                                        retries = 5
+                                        continue
                                     else:
                                         await asyncio.sleep(0.2)
                                 except Exception as e:
-                                    action_data = {"thought": "Error reading brain file.", "action": "post_message", "payload": {"message": f"Tunnel error: {str(e)}"}}
+                                    logger.error(f"Unexpected error in brain_output.json (search loop): {e}")
+                                    raw_output = ""
+                                    try:
+                                        with open(BRAIN_OUTPUT, "r", encoding="utf-8") as f:
+                                            raw_output = f.read()[:500]
+                                    except Exception:
+                                        raw_output = "(could not read raw content)"
                                     if os.path.exists(BRAIN_OUTPUT): os.remove(BRAIN_OUTPUT)
-                                    break
+                                    error_payload = {
+                                        "_protocol": load_brain_protocol(),
+                                        "tab_id": tab_id,
+                                        "query": session.get("user_query"),
+                                        "error": {
+                                            "type": "MALFORMED_JSON",
+                                            "message": f"Your last brain_output.json caused an error: {str(e)}",
+                                            "raw_output_preview": raw_output,
+                                            "instructions": "You MUST write valid JSON to server/brain_output.json. Check for: unescaped quotes inside strings, missing commas, line breaks in string values (use \\n instead), and unclosed braces. See the Technical Schema and examples in the protocol above. Try your last action again with properly formatted JSON."
+                                        },
+                                        "screenshot_path": screenshot_rel_path,
+                                        "history": session["history"]
+                                    }
+                                    temp_input = f"{BRAIN_INPUT}.tmp"
+                                    with open(temp_input, "w", encoding="utf-8") as f:
+                                        json.dump(error_payload, f, indent=2)
+                                    os.replace(temp_input, BRAIN_INPUT)
+                                    brain_turn_counter += 1
+                                    with open(BRAIN_READY_FLAG, "w") as f:
+                                        f.write(str(brain_turn_counter))
+                                    logger.info(f"Error feedback written to {BRAIN_INPUT}, turn #{brain_turn_counter}")
+                                    while not os.path.exists(BRAIN_OUTPUT):
+                                        await asyncio.sleep(0.5)
+                                    retries = 5
+                                    continue
 
                             # Update action_name for the loop check
                             action_name = action_data.get('action')
