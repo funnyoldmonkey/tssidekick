@@ -18,6 +18,7 @@ server/__pycache__/
 
 # Environment & IDE
 .env
+**/.env
 .vscode/
 .idea/
 
@@ -25,14 +26,13 @@ server/__pycache__/
 tssidekick_memory.json
 tssidekick_log.txt
 
-#OpenCode Swarm
+# OpenCode Swarm
 .opencode/
-.swarm/
+
+# Scratch & KB (runtime data)
 scratch/
-
-#KB
 kb/
-kb/fixes.log
 
-#Testing
-test/
+# One-off utility scripts
+server/bis_widget.js
+server/check_image.py
